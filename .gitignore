@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Never commit raw provider captures — pre-signed URLs are live credentials
+# and captures carry account numbers. Scrubbed fixtures live in
+# tests/fixtures/ and are committed deliberately.
+/captures
+*.raw.html
+*.raw.json
+*.har
+
+# Downloaded provider documents (1098-E, statements) are PII.
+*.pdf
+!docs/**/*.pdf
+
+.DS_Store

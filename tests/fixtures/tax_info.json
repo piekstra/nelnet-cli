@@ -1,0 +1,42 @@
+{
+  "_fixture": "SYNTHETIC-FIXTURE-NOT-A-REAL-CAPTURE",
+  "lastName": "DOE",
+  "firstName": "JANE",
+  "middleInitial": "Q",
+  "addressLine1": "000 EXAMPLE ST",
+  "addressLine2": null,
+  "city": "ANYTOWN",
+  "state": "FL",
+  "zip": "00000",
+  "phone": "000-000-0000",
+  "email": "user@example.com",
+  "country": "USA",
+  "dob": "1970-01-01T00:00:00",
+  "servicerAccount": null,
+  "edServicerAccount": {
+    "taxInfoDictionary": {
+      "TaxDeductibleInterest": "222.22",
+      "TaxPaidOnExceptionYearLoans": "No",
+      "TaxFormCorrection": null,
+      "SSN": "XXX-XX-0000",
+      "FullName": "JANE Q DOE",
+      "FullAddress": "000 EXAMPLE ST ANYTOWN FL 00000",
+      "CityStateZip": "ANYTOWN, FL 00000",
+      "AccountNumber": "000000000000"
+    },
+    "accountNumber": "000000000000",
+    "accountSource": "ED",
+    "daysPastDue": 0,
+    "errorMessage": null,
+    "isValid": true,
+    "loanClass": "F",
+    "refreshDate": "2026-08-12T00:00:00",
+    "totalCapitalizedInterestAmount": 111.11,
+    "totalInterestAccruedAmount": 222.22,
+    "totalOutstandingBalance": 11333.33,
+    "taxDeductibleInterest": 222.22
+  },
+  "commercialAccounts": [],
+  "hasValidServicerAccount": false,
+  "hasValidEdServicerAccount": true
+}

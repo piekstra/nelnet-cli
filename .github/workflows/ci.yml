@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # fmt + lint + test + smoke, all on Linux (1x cost). Nothing in this gate is
+  # platform-specific: the test suite is fully offline and never touches the OS
+  # keychain, and pk-cli-secrets has a Linux backend (sync-secret-service +
+  # crypto-rust) that builds without system packages.
+  #
+  # Coverage gap, stated deliberately: the macOS Keychain code path and the
+  # dev-signing flow are NOT exercised in CI. They are covered by dogfooding on
+  # the owner's Mac (`make install` + a real run). Paying ~10x for a macOS
+  # runner on every push to cover that sliver is not worth it.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # pk-cli-secrets uses the Linux secret-service keyring backend, which
+      # pulls libdbus-sys — a *build-time* system dependency. Nothing here
+      # talks to D-Bus at runtime (the tests never touch the keychain); it is
+      # only needed to compile.
+      - name: install libdbus (build dependency of the keyring backend)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: verify (fmt-check + lint + test + smoke)
+        run: make verify
+
+  security:
+    runs-on: ubuntu-latest
+    # gitleaks and the audit annotators call the PR API on `pull_request`
+    # events; with the read-only default token they fail as
+    # "Resource not accessible by integration" — a permissions failure that
+    # looks like a secret-scanning failure, and only on the first PR.
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+      checks: write # rustsec/audit-check publishes a check run; without this it dies with "Resource not accessible by integration"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install libdbus (build dependency of the keyring backend)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

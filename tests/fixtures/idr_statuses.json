@@ -1,0 +1,15 @@
+[
+  {
+    "_fixture": "SYNTHETIC-FIXTURE-NOT-A-REAL-CAPTURE",
+    "requestDateTime": "2026-02-17T00:00:00",
+    "status": "PROCESSED",
+    "type": "IDR",
+    "nextStep": null,
+    "choiceDesc": null,
+    "choiceID": null,
+    "statusDesc": null,
+    "docTypeCode": null,
+    "functionTypeDesc": null,
+    "functionTypeID": null
+  }
+]

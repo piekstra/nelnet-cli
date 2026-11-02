@@ -1,0 +1,17 @@
+# gitleaks config for nelnet-cli.
+#
+# The fixtures are synthetic and deliberately contain all-zero UUIDs and dummy
+# tokens; without these allowlists gitleaks flags them on every run and the
+# signal gets ignored, which is worse than not scanning.
+title = "nelnet-cli"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic fixture tokens — all-zero UUIDs only"
+regexes = ['''00000000-0000-0000-0000-[0-9a-f]{12}''']
+
+[[allowlists]]
+description = "Fixture and doc files are reviewed by the fixture-hygiene test"
+paths = ['''tests/fixtures/.*''']

@@ -1,0 +1,48 @@
+{
+  "_fixture": "SYNTHETIC-FIXTURE-NOT-A-REAL-CAPTURE",
+  "paymentHistoryList": [
+    {
+      "refreshDate": "2026-08-12T00:00:00",
+      "postDate": null,
+      "effectiveDate": "2026-06-12T00:00:00",
+      "description": "Electronic",
+      "originalLoanBalance": null,
+      "transactionEndingBalance": null,
+      "borrowerAccountNumber": "000000000000",
+      "groupId": null,
+      "groupLevelPaymentHistories": [{}],
+      "sumOfPaymentAmount": 100.00,
+      "sumOfPrincipal": 95.11,
+      "sumOfFees": 0.00,
+      "sumOfInterest": 4.89,
+      "paymentMethod": null,
+      "paymentType": null,
+      "paymentId": 0,
+      "paymentDetailId": 0,
+      "confirmationNumber": 0,
+      "repaymentBenefitStatus": "Not Qualified"
+    },
+    {
+      "refreshDate": "2026-08-12T00:00:00",
+      "postDate": null,
+      "effectiveDate": "2026-05-12T00:00:00",
+      "description": "Electronic",
+      "originalLoanBalance": null,
+      "transactionEndingBalance": null,
+      "borrowerAccountNumber": "000000000000",
+      "groupId": null,
+      "groupLevelPaymentHistories": [{}],
+      "sumOfPaymentAmount": 222.22,
+      "sumOfPrincipal": 200.00,
+      "sumOfFees": 0.00,
+      "sumOfInterest": 22.22,
+      "paymentMethod": null,
+      "paymentType": null,
+      "paymentId": 0,
+      "paymentDetailId": 0,
+      "confirmationNumber": 0,
+      "repaymentBenefitStatus": "Not Qualified"
+    }
+  ],
+  "paymentHistoryTotals": null
+}

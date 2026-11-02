@@ -1,0 +1,38 @@
+{
+  "_fixture": "SYNTHETIC-FIXTURE-NOT-A-REAL-CAPTURE",
+  "statementList": [
+    {
+      "documentId": "00000000-0000-0000-0000-000000000001",
+      "documentTitle": "STMT-000000000-20260801-000000.pdf",
+      "createdDate": "2026-08-02T10:37:08",
+      "docReceivedDate": "2026-08-01T17:00:00",
+      "subject": null,
+      "readFlag": false,
+      "isPlainText": false,
+      "isHidden": false,
+      "lenderId": 0,
+      "letterType": "STMT",
+      "templateName": null,
+      "isDirect": true,
+      "accountNumber": "000000000000",
+      "subjectLine": null
+    },
+    {
+      "documentId": "00000000-0000-0000-0000-000000000002",
+      "documentTitle": "STMT-000000000-20260701-000000.pdf",
+      "createdDate": "2026-07-02T08:49:04",
+      "docReceivedDate": "2026-07-01T17:00:00",
+      "subject": null,
+      "readFlag": true,
+      "isPlainText": false,
+      "isHidden": false,
+      "lenderId": 0,
+      "letterType": "STMT",
+      "templateName": null,
+      "isDirect": true,
+      "accountNumber": "000000000000",
+      "subjectLine": null
+    }
+  ],
+  "accountNumbersList": ["000000000000"]
+}

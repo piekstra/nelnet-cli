@@ -1,0 +1,1 @@
+{"_fixture":"SYNTHETIC-FIXTURE-NOT-A-REAL-CAPTURE","id_token":"DUMMY-ID-TOKEN","access_token":"DUMMY-ACCESS-TOKEN","refresh_token":"DUMMY-REFRESH-TOKEN","token_type":"Bearer","scope":"openid offline_access mma.api.read mma.api.write","expires_at":2000000000}

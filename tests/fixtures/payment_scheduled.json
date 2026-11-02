@@ -1,0 +1,26 @@
+{
+  "_fixture": "SYNTHETIC-FIXTURE-NOT-A-REAL-CAPTURE",
+  "scheduledPaymentsList": [
+    {
+      "refreshDate": null,
+      "postDate": "2027-01-28T00:00:00",
+      "effectiveDate": "2027-01-28T00:00:00",
+      "description": "Auto Debit",
+      "originalLoanBalance": null,
+      "transactionEndingBalance": null,
+      "borrowerAccountNumber": "000000000000",
+      "groupId": "0000000001",
+      "groupLevelPaymentHistories": null,
+      "sumOfPaymentAmount": 333.33,
+      "sumOfPrincipal": null,
+      "sumOfFees": null,
+      "sumOfInterest": null,
+      "paymentMethod": "ACH",
+      "paymentType": "Scheduled",
+      "paymentId": 0,
+      "paymentDetailId": 0,
+      "confirmationNumber": 0,
+      "repaymentBenefitStatus": "Not Qualified"
+    }
+  ]
+}

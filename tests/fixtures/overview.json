@@ -1,0 +1,13 @@
+{
+  "_fixture": "SYNTHETIC-FIXTURE-NOT-A-REAL-CAPTURE",
+  "currentBalance": 11333.33,
+  "outstandingPrincipal": 11111.11,
+  "accruedInterest": 222.22,
+  "lastBumpDate": "2026-08-11T00:00:00",
+  "lastPaymentDate": "2026-06-12T00:00:00",
+  "lastPaymentAmount": 100.00,
+  "inSchool": false,
+  "lastDisbursementDate": "2025-01-24T00:00:00",
+  "lastDisbursementAmount": 500.00,
+  "hasPaymentHistory": true
+}

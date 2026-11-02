@@ -1,0 +1,74 @@
+name: release
+
+# Tag-triggered only. This is the one place a macOS runner is justified —
+# *-apple-darwin artifacts cannot be built on Linux — and it runs per release,
+# not per push.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN: nlnt
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # Build-time dependency of the Linux keyring backend only.
+      - name: install libdbus
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }}
+      # Asset names are the contract `pk-cli-selfupdate` expects:
+      # <bin>-<target>.tar.gz plus a matching .sha256.
+      - name: package
+        run: |
+          set -euo pipefail
+          tar -czf "${BIN}-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" "${BIN}"
+          shasum -a 256 "${BIN}-${{ matrix.target }}.tar.gz" \
+            > "${BIN}-${{ matrix.target }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.BIN }}-${{ matrix.target }}.tar.gz
+            ${{ env.BIN }}-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true
