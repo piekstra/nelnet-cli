@@ -13,7 +13,9 @@ this repo's code, it drifts.
 
 Every `pk-cli-*` crate is pinned to the same `cli-common` revision (see
 `Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`,
-and renewals take `pk-cli-auth`'s `refresh_lock`, which needs Rust 1.89.
+whose kept profile needs cli-common v0.16.0 or later and whose site-storage
+clearing and `profile_exists` need v0.19.0. Renewals take `pk-cli-auth`'s
+`refresh_lock`, which needs Rust 1.89.
 
 ## The single most important fact
 
@@ -51,7 +53,7 @@ make install  # install to ~/.cargo/bin, dev-signed
 | `src/main.rs` | clap tree, `auth`/`config` commands, exit-code mapping |
 | `src/lib.rs` | module wiring, `BIN`/`REPO` constants |
 | `src/client.rs` | Bearer HTTP session, sentinel headers, token refresh, the auth/bot guards, `%PDF` check, **the endpoint map** |
-| `src/browser.rs` | the `auth login --browser` capture: start URL, the one host it reads, the `localStorage` expression |
+| `src/browser.rs` | the `auth login --browser` capture: start URL, the one host it reads, the `localStorage` expression, the profile choice |
 | `src/parse.rs` | responses → DTOs; all provider field knowledge |
 | `src/model.rs` | `LoanSummary`, `Loan`, `Transaction`, `TaxInfo` DTOs |
 | `src/config.rs` | non-secret settings, keychain account names |
@@ -110,6 +112,25 @@ cannot spend a code or lock the account. Still:
   it is the Akamai-protected identity host, and the owner's own clicks are the
   only traffic it should see from the window. `docs/api.md` § How the CLI gets
   the initial bundle records the capture.
+- **The browser profile is kept on disk** (`--fresh-profile` skips it for one
+  sign-in), so **the launch keeps `clear_site_storage` on and the expression only
+  reads**. A bundle left in the profile goes stale at the CLI's next refresh, and
+  handing it over or letting the SPA present it breaks the single-holder rule
+  below. The crate may evaluate the expression more than once, so a write in it
+  could lose the bundle. `auth logout` removes the profile last, through `logout_browser`'s
+  closure: the binary binds `pk_cli_browser::forget_profile`, tests bind
+  `forget_profile_in` under a temp dir. **No test may reach the owner's real
+  profile.** It is a full Chrome profile that outlives even a failed sign-in
+  (SECURITY.md lists its contents). Every browser sign-in goes through
+  `browser::sign_in`, including the step that parses, verifies and stores the
+  session, so any failure after the window opens names the profile
+  (`failed_sign_in`). Logout attempts every step, keychain first and profile last,
+  then names what was cleared and what remains (`incomplete_logout`). The config is
+  read only in the arms that use it, so a broken file doesn't stop logout; `dispatch`
+  takes the logout as a seam so a test can run it with neither keychain nor profile.
+  `auth status` reports the profile through `browser_profile_status`'s closure: the
+  binary binds `profile_exists`, tests bind `profile_exists_in`. Don't recompute its
+  path here.
 - `with_reauth` retries **once** and never loops. The recovery step is
   `client::refresh_or_relogin`: exchange the refresh token, and only if that is
   dead run the configured `refresh_command` (the reference capture script in

@@ -55,11 +55,38 @@ nlnt documents list                 # statements (real PDFs)
 nlnt documents download <id> -o ~/Documents/statement.pdf
 ```
 
-`auth login --browser` opens Chrome with a throwaway profile at
-`https://nelnet.studentaid.gov`. Sign in there — username, password and the
-one-time code go to Nelnet, never through `nlnt`. Once the portal has stored its
-session, `nlnt` reads it, closes the window and deletes the profile. Chrome is
-found at the standard install paths; set `NLNT_CHROME` to use another binary.
+`auth login --browser` opens Chrome at `https://nelnet.studentaid.gov`. Sign in
+there — username, password and the one-time code go to Nelnet, never through
+`nlnt`. Once the portal has stored its session, `nlnt` reads it from the page and
+closes the window. Chrome is found at the standard install paths; set
+`NLNT_CHROME` to use another binary.
+
+The window runs in a Chrome profile `nlnt` **keeps on disk** between sign-ins
+(owner-only, `~/Library/Application Support/piekstra.nlnt/browser-profile` on
+macOS, `$XDG_DATA_HOME/piekstra.nlnt/browser-profile` or
+`~/.local/share/piekstra.nlnt/browser-profile` on Linux), so Nelnet's cookies
+carry over and a later sign-in may need less input: no one-time code on a device
+Nelnet remembers. `nlnt auth login --browser --fresh-profile` signs in once
+through a scratch profile, deleted afterwards, and leaves the kept one alone.
+
+The trade is more than cookies. `nlnt` clears the page's storage, the token bundle
+with it, before Chrome starts and once it stops; after a crash, the next launch
+clears it. But this is a full Chrome profile, so it also keeps browsing history with
+full URLs, query strings included, and the HTTP cache, for whatever loads in that
+window. Chrome's cookie encryption does not cover those,
+and on Linux with no desktop keyring it uses a fixed, publicly known key, which
+protects the session cookie no better. The directory's `0700` mode is then the
+only protection, and ordinary backups usually include the directory
+([`SECURITY.md`](SECURITY.md)). The sign-in's OIDC
+redirects stay in the history, query strings and all. **Use `--fresh-profile` if
+you view loan or statement pages in that window.**
+
+The profile stays after a failed sign-in too, possibly with a live session, and
+the error says so. `nlnt auth status` says whether the profile exists
+(`browser_profile`), not whether it is signed in. `nlnt auth logout` removes it and clears the stored session with it.
+It attempts every step even when one fails. If one fails, or a sign-in or a Chrome
+window is using the profile, it exits non-zero and says what was cleared, what
+remains and how to finish.
 
 The session carries a refresh token, so this is a **one-time sign-in**: `nlnt`
 renews the short-lived access token itself (`nlnt auth refresh`, or
@@ -90,8 +117,8 @@ security add-generic-password -U -s piekstra.nlnt -a password
 nlnt auth refresh --command "node $(pwd)/scripts/nlnt-capture.mjs" --save
 ```
 
-The reference script (`scripts/nlnt-capture.mjs`) drives real Chrome with a
-persistent profile: it silently renews with no MFA **while the identity session
+The reference script (`scripts/nlnt-capture.mjs`) drives real Chrome with its own
+persistent profile (`auth logout` does not touch that one): it silently renews with no MFA **while the identity session
 lives (observed ~1 hour)**, and after that does a full username/password login —
 needing an MFA code unless the device is trusted. If it can't get a fresh
 session it **errors clearly rather than storing a dead token**. So "unattended"

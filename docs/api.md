@@ -67,7 +67,7 @@ the same hazard as a rotating cookie jar.
 ### How the CLI gets the initial bundle
 
 The CLI never replays a password and never drives the identity host's login
-pages. The owner signs in once, in a browser, and the CLI takes the bundle the
+pages. The owner signs in once, in a browser, and the CLI reads the bundle the
 SPA stores. Both ways in below end in the same code: `Session::parse_captured`
 (the bundle, or a bare `Bearer` token), one live read of `/api/1/loan/overview`
 to prove it works, and one keychain item. From then on `auth refresh` (and
@@ -81,13 +81,13 @@ holds the capture:
 
 | | |
 | --- | --- |
-| Launch URL | `https://nelnet.studentaid.gov`, in a Chrome started with a throwaway `0700` profile, a DevTools port Chrome picks itself, and no automation flags |
+| Launch URL | `https://nelnet.studentaid.gov`, in a Chrome started with the owner-only (`0700`) profile the CLI keeps (`--fresh-profile`: a throwaway one), a DevTools port Chrome picks itself, and no automation flags |
 | Sign-in | by the owner, on Nelnet's own pages: the SPA sends them to `auth.nelnet.studentaid.gov` for username, password and the one-time code |
 | Read from | pages on exactly `nelnet.studentaid.gov` (`HostRule::exact`): an `https` page on the default port, matched label for label, whose document's own `location.hostname` matches too |
 | Never touched | `auth.nelnet.studentaid.gov` (Akamai, the bot checks): the CLI evaluates nothing there and navigates nothing there; the owner's own sign-in passes through it in the window. `mmaapi` is reached only by the verifying read afterwards, over the CLI's HTTP client |
 | What is read | `localStorage['oidc.user:https://auth.nelnet.studentaid.gov:mma']`, the value the DevTools fallback copies. No cookies |
 | Ready when | the value contains `access_token`; before that the expression answers `null` |
-| Then | the tab is closed the moment the value is read, Chrome is stopped, and the profile is deleted |
+| Then | the tab is closed at once and Chrome is stopped. The crate then removes the profile's site storage (`Launch::clear_site_storage`). The profile stays on disk with its cookies |
 
 The expression (`browser::expression`, pinned by a unit test):
 
@@ -98,22 +98,62 @@ The expression (`browser::expression`, pinned by a unit test):
 What follows from it:
 
 - **The CLI is the sole holder from the start.** The tab closes before the SPA
-  can renew the token it just stored, and the profile (with its `idsrv` cookie)
-  is deleted, so no browser keeps a live copy of the refresh-token family. The
-  single-holder rule in § Token lifetimes holds without the owner doing
-  anything; on the DevTools path it is theirs to keep (close the tab).
-- **Every browser login asks for the one-time code.** The throwaway profile
-  keeps no "remember this device" cookie from one run to the next.
+  can renew the token it just stored. `Launch::clear_site_storage` removes the
+  profile's site storage before Chrome starts and again once it has stopped, so
+  between runs the kept profile holds no copy of the refresh-token family for a
+  later window to hand over or for the SPA to present. A bundle the capture sees
+  is therefore this sign-in's, so the expression writes nothing and checks no
+  expiry. The single-holder rule in § Token lifetimes holds without the owner
+  doing anything; on the DevTools path it is theirs to keep (close the tab).
+- **After a crash the bundle can stay on disk until the next launch.** A crash or
+  a second Ctrl-C skips the removal after Chrome stops, as does a Chrome still
+  running in the profile once the spawned process has ended, with a warning. The
+  next launch's removal covers each, before Chrome starts, and `auth logout`
+  removes it with the profile.
+- **A later sign-in can need less input (UNVERIFIED-LIVE).** The kept profile
+  (`<data dir>/piekstra.nlnt/browser-profile`) keeps the identity host's cookies
+  but no bundle. While `idsrv` lasts (~1 hour, § Token lifetimes) the SPA should
+  get a new bundle with no password or code; after that, a device Nelnet
+  remembers (`SaveTrustedDevice`) should skip only the code. Each sign-in mints
+  a new token family. The crate asks Chrome to quit over its debug port and waits
+  up to 5 s, so a persistent cookie set just before the close reaches disk;
+  cli-common measured that in headless Chrome 156 only, so a visible window is
+  **UNVERIFIED-LIVE**. `--fresh-profile` signs in through a scratch profile,
+  removed when the window closes, so that sign-in is an unknown device and asks
+  for the code.
+- **The profile keeps more than cookies.** It is a full Chrome profile, so the
+  history keeps the sign-in's OIDC redirects with their query strings, beside the
+  HTTP cache; SECURITY.md lists what it holds, and its exact
+  contents for this portal are **UNVERIFIED-LIVE**. Any sign-in that fails once
+  the window has opened leaves it in place (a timeout, a closed window, Ctrl-C, a
+  refused verifying read, a bundle the parser refuses, a failed keychain write),
+  and the error says so and names `nlnt auth logout`. `auth status` reports whether it exists
+  (`browser_profile`), not whether it is signed in. A profile needing repair leaves
+  the field out, with a warning naming the path and the fix, unless `-q`.
+- The verifying read must return data. An empty body, `null`, `{}` or anything else
+  that isn't JSON with something in it is exit 5 with nothing stored, since a stale
+  session could get one.
+- If a renewal in another process outlasts the lock's wait, `auth logout` exits 5
+  saying the session is deleted but may be stored again, and to wait a minute and
+  rerun.
+- `auth logout` removes the kept profile as its last step, and attempts every step
+  even when one fails, or when the config can't be parsed (`--forget` clears that
+  file). A failed step, or a sign-in or a Chrome using the profile,
+  exits non-zero with the first failure's code, naming what was cleared, what
+  remains and how to finish. The capture script's profile below is a
+  separate one, which logout does not touch.
 - A captured value the parser refuses is exit 5: the portal changed what it
   stores, which is not a usage mistake. A verifying read the portal refuses is
-  exit 3, with nothing stored.
+  exit 3, with nothing stored. A `429` or `5xx` on that read is exit 5, also with
+  nothing stored and no second read; the window is closed and its site storage
+  cleared, so a retry takes a new window.
 - Chrome is found at the standard install paths (Chrome, Chromium, Edge on
   macOS and Linux), or `NLNT_CHROME` names the binary, the same variable
   `scripts/nlnt-capture.mjs` reads. With no Chrome, the error points at the
   fallback below.
 - The wait is 10 minutes. A timeout or a closed window is exit 3, Ctrl-C
-  cancels (the window and profile are cleaned up), and `-q` silences the status
-  lines. `--browser` refuses `--stdin`, `--from-env`, `--no-verify` and
+  cancels (Chrome is stopped, a `--fresh-profile` scratch profile removed), and
+  `-q` silences the status lines. `--fresh-profile` without `--browser` is exit 2. `--browser` refuses `--stdin`, `--from-env`, `--no-verify` and
   `--non-interactive` with exit 2, before the keychain is read or a window
   opens.
 
