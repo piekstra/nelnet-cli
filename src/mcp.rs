@@ -233,6 +233,11 @@ fn tool_err(e: CliError) -> ToolError {
         CliError::Other(m) if m.starts_with(SESSION_UNREADABLE) => {
             ToolError::auth(SESSION_UNREADABLE)
         }
+        // A keychain that refused: a person's answer to a prompt, not a dead session.
+        CliError::Keychain(m) => ToolError::other(format!("the keychain refused: {m}")).with_fix(
+            "Ask the user to allow `nlnt` in the keychain prompt, or in Keychain Access, then \
+             call the tool again",
+        ),
         other => other.into(),
     }
 }

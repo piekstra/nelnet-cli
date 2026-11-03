@@ -670,6 +670,8 @@ fn tax_year_uses_the_year_a_title_names_and_else_the_date() {
          "docReceivedDate": "2025-02-01T00:00:00"},
         {"documentId": "other", "documentTitle": "June Statement",
          "docReceivedDate": "2026-06-01T00:00:00"},
+        {"documentId": "identifier", "documentTitle": "STMT-1202512-June.pdf",
+         "docReceivedDate": "2026-07-01T00:00:00"},
     ]})
     .to_string();
     let tools = with(Fixtures::default().answering(paths::STATEMENTS, &body));
@@ -683,7 +685,7 @@ fn tax_year_uses_the_year_a_title_names_and_else_the_date() {
         ids
     };
     assert_eq!(ids(2025), ["named", "dated"]);
-    assert_eq!(ids(2026), ["other"]);
+    assert_eq!(ids(2026), ["identifier", "other"]);
 
     let says = error(&tools, DOCUMENTS_TOOL, json!({"tax_year": 25}));
     assert!(says.starts_with("usage:"), "{says}");
@@ -730,6 +732,19 @@ fn a_missing_or_dead_session_names_the_one_command_that_fixes_it() {
         assert_eq!(says.matches("nlnt auth login").count(), 1, "{says}");
         assert!(!says.contains("nlnt auth refresh"), "{says}");
     }
+}
+
+/// A renewal writes the session back before it spends the token, so this is what a
+/// person refusing that prompt sees. A new sign-in would not help.
+#[test]
+fn a_refused_keychain_asks_for_access_and_not_a_sign_in() {
+    let says = failing_with(paths::TAX_INFO, TAX_TOOL, || {
+        CliError::Keychain("storing credential: denied".into())
+    });
+    assert!(says.contains("storing credential"), "{says}");
+    assert!(says.contains("Keychain Access"), "{says}");
+    assert!(!says.contains("auth login"), "{says}");
+    assert!(!says.contains("could not be read"), "{says}");
 }
 
 #[test]

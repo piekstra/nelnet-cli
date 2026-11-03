@@ -24,6 +24,8 @@ Earlier releases are described on the GitHub releases page.
 - `self-update` says to restart a running `nlnt mcp --http` and to install the new
   `.mcpb`.
 - A failure that got no answer from the portal no longer prints its URL.
+- `documents list --tax-year` no longer reads a year out of a longer run of digits in a
+  title.
 - cli-common v0.21.0, up from v0.20.0.
 
 ## v0.2.3 — 2026-11-03
