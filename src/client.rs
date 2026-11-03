@@ -246,7 +246,7 @@ impl Portal {
         reqwest::blocking::Client::builder()
             .user_agent(user_agent())
             .default_headers(sentinel_headers())
-            .timeout(Duration::from_secs(45))
+            .timeout(HTTP_TIMEOUT)
             .connect_timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| CliError::Other(format!("could not build HTTP client: {e}")))
@@ -543,24 +543,37 @@ fn output_within(
 }
 
 fn stop(child: &mut std::process::Child, grace: Duration) {
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-s", "TERM", &child.id().to_string()])
-            .status();
-        let asked = std::time::Instant::now();
-        while asked.elapsed() < grace {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+    stop_with(child, grace, ask_to_stop);
+}
+
+/// A child already reaped is left alone: its pid may belong to something else by
+/// now, and anything it left behind is in the error's "may still be running".
+fn stop_with(child: &mut std::process::Child, grace: Duration, ask: impl FnOnce(u32)) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
     }
-    #[cfg(not(unix))]
-    let _ = grace;
+    ask(child.id());
+    let asked = std::time::Instant::now();
+    while asked.elapsed() < grace {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[cfg(unix)]
+fn ask_to_stop(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-s", "TERM", &pid.to_string()])
+        .status();
+}
+
+/// Nothing to ask with here, so the grace only delays the kill.
+#[cfg(not(unix))]
+fn ask_to_stop(_pid: u32) {}
 
 /// Renew the session, preferring the cheap path.
 ///
@@ -602,7 +615,7 @@ pub fn refresh_or_relogin(
             let command =
                 command.expect("plan_after_refresh emits RunCommand only when has_command is true");
             let capture_lock = RefreshLock::at(lock.path().with_file_name(CAPTURE_LOCK))
-                .wait_at_most(CAPTURE_DEADLINE + CAPTURE_LOCK_MARGIN);
+                .wait_at_most(CAPTURE_LOCK_WAIT);
             capture_once(
                 &capture_lock,
                 presented,
@@ -623,14 +636,21 @@ pub fn refresh_or_relogin(
     }
 }
 
+/// One request's limit, connecting included.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a capture command may run: past the reference script's own 4-minute
 /// limit, so its teardown normally runs before this does.
 const CAPTURE_DEADLINE: Duration = Duration::from_secs(300);
 /// How long a stopped capture has to clean up: past the reference script's 15 s
 /// limit on its one-time-code command, during which it cannot handle a signal.
 const CAPTURE_STOP_GRACE: Duration = Duration::from_secs(20);
-/// A process waiting for another's capture waits this much past its deadline.
-const CAPTURE_LOCK_MARGIN: Duration = Duration::from_secs(15);
+/// How long a process waits for another's capture: as long as that capture can hold
+/// the lock, which is its deadline, its grace, and the read that proves its bundle,
+/// with a little over. A store that has to wait on the refresh lock is rarer, and
+/// costs this process only an error it can retry.
+const CAPTURE_LOCK_WAIT: Duration = Duration::from_secs(
+    CAPTURE_DEADLINE.as_secs() + CAPTURE_STOP_GRACE.as_secs() + HTTP_TIMEOUT.as_secs() + 15,
+);
 /// Beside the refresh lock, and as empty. It keeps two captures from running at
 /// once. It is its own file because a capture can take minutes and needs a code,
 /// and `RefreshLock`'s holders must not make a login or a logout wait on that.
@@ -1502,6 +1522,16 @@ mod tests {
             .unwrap()
             .success();
         assert!(!alive, "the command was killed and reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_already_reaped_is_not_signalled() {
+        let mut child = sh("exit 0").spawn().unwrap();
+        child.wait().unwrap();
+        stop_with(&mut child, NO_HURRY, |_| {
+            panic!("its pid may belong to something else now")
+        });
     }
 
     #[cfg(unix)]
