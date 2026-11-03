@@ -2,6 +2,20 @@
 
 Earlier releases are described on the GitHub releases page.
 
+## v0.2.1 — 2026-11-03
+
+- `nlnt auth login --browser` keeps a finished sign-in when the read that checks it
+  can't tell: a `429`, a `5xx`, a `404`, a dropped connection, a body with no data or
+  an edge block. The session is stored, exit 0, with a warning even under `-q` that
+  it is unverified, naming `nlnt auth login --browser --overwrite` if reads keep
+  failing. These used to store nothing, and
+  the owner had to sign in again. A definite refusal still stores nothing. `--stdin`,
+  `--from-env` and `auth set-credential` are unchanged.
+- A refused verifying read keeps the portal's answer in its message.
+- A `403` with an HTML page is an edge block on every read, exit 5 with its own
+  reason and the same way out. It used to read as an expired token, and spent a
+  refresh token on a retry. No such page has been observed yet.
+
 ## v0.2.0 — 2026-11-03
 
 cli-common v0.19.0, which needs Rust 1.89: the browser sign-in keeps its Chrome

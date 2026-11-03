@@ -78,6 +78,10 @@ enum AuthCmd {
     ///
     ///   nlnt auth login --browser
     ///
+    /// The window can't be read twice, so if the check can't tell (an outage, a
+    /// dropped connection, an edge block) the session is stored with a warning
+    /// that it is unverified. A session the portal refuses is not stored.
+    ///
     /// The window's Chrome profile stays on disk for the next sign-in, so Nelnet
     /// can remember the device; `--fresh-profile` signs in through a scratch one
     /// instead, and `auth logout` removes the kept one.
@@ -569,9 +573,11 @@ fn login(
     let retry = retry_command(browser, fresh_profile, login.overwrite);
     let verify = !login.no_verify;
     let lock = RefreshLock::for_binary(BIN)?;
+    let mut unverified = None;
     // Both paths are one from the value on: the stdin parser, one verifying
-    // read, the keychain.
-    let store_session = |raw: &Secret| -> Result<(), CliError> {
+    // read, the keychain. They differ on a read that can't tell: a sign-in from
+    // the window can't be read again, and one piped in can be piped in again.
+    let mut store_session = |raw: &Secret| -> Result<(), CliError> {
         let session = Session::parse_captured(raw.expose()).map_err(|e| {
             if browser {
                 unexpected_capture(e)
@@ -579,6 +585,11 @@ fn login(
                 e
             }
         })?;
+        if browser {
+            unverified = client::keep_signed_in_session(cfg, creds, session, cli.common.verbose)
+                .map_err(|e| rejected_at_login(e, &retry))?;
+            return Ok(());
+        }
         client::establish_session(cfg, creds, session, verify, cli.common.verbose)
             .map_err(|e| rejected_at_login(e, &retry))
     };
@@ -597,8 +608,12 @@ fn login(
         };
         store_session(&login.source.read(prompt)?)?;
     }
+    // Under `-q` too: nothing has tested this session yet.
+    if let Some(why) = &unverified {
+        eprintln!("warning: {}", unverified_warning(why));
+    }
     if !cli.common.quiet {
-        let how = if verify {
+        let how = if verify && unverified.is_none() {
             "verified and stored"
         } else {
             "stored (unverified)"
@@ -610,6 +625,17 @@ fn login(
         );
     }
     Ok(())
+}
+
+/// `auth status` makes no request, so it isn't what tests the session. A later
+/// read can repeat the answer, and then nothing but a new sign-in gets past it.
+fn unverified_warning(why: &str) -> String {
+    format!(
+        "the sign-in is kept, but its session is stored unverified: {}. A later read, such as \
+         `{BIN} summary`, may settle it; {}.",
+        client::without_way_out(why),
+        client::READS_KEEP_FAILING
+    )
 }
 
 /// The command a failed login tells the owner to re-run: the same path in the
@@ -641,13 +667,17 @@ fn unexpected_capture(err: CliError) -> CliError {
 
 /// A verifying read the portal refused leaves nothing stored, so the read
 /// guard's "run `auth refresh`" has nothing to refresh; point at a fresh
-/// sign-in. Other errors (the bot wall, an outage) pass through.
+/// sign-in, keeping what the portal answered. Other errors (the bot wall, an
+/// outage) pass through.
 fn rejected_at_login(err: CliError, retry: &str) -> CliError {
     match err {
-        CliError::Auth(_) => CliError::Auth(format!(
-            "the portal refused the session on the verifying read; nothing was stored — sign \
-             in again and re-run `{retry}`"
-        )),
+        CliError::Auth(m) => {
+            let why = m.strip_suffix(client::RENEW_ADVICE).unwrap_or(&m);
+            CliError::Auth(format!(
+                "the portal refused the session on the verifying read ({why}); nothing was \
+                 stored — sign in again and re-run `{retry}`"
+            ))
+        }
         other => other,
     }
 }
@@ -1132,6 +1162,49 @@ mod tests {
         assert!(m.contains("`nlnt auth login --browser --overwrite`"), "{m}");
         // The read guard's advice does not apply: nothing is stored to refresh.
         assert!(!m.contains("auth refresh"), "{m}");
+    }
+
+    /// The refusal keeps the guard's own reason, not its renewal advice, and an
+    /// edge block is not reworded as a dead session.
+    #[test]
+    fn a_refusal_keeps_its_reason_and_an_edge_block_stays_one() {
+        let retry = "nlnt auth login --browser";
+        let refused = client::guard("/dummy", 403, "application/json", "{}").unwrap_err();
+        let e = rejected_at_login(refused, retry);
+        assert_eq!(e.exit_code(), 3);
+        let m = e.to_string();
+        assert!(m.contains("(portal returned 403 for /dummy"), "{m}");
+        assert!(!m.contains("auth refresh"), "{m}");
+        assert!(m.contains("nothing was stored"), "{m}");
+
+        let blocked = client::guard("/dummy", 403, "text/html", "<html></html>").unwrap_err();
+        let e = rejected_at_login(blocked, retry);
+        assert_eq!(e.exit_code(), 5);
+        let m = e.to_string();
+        assert!(m.contains("HTTP 403 with an HTML page"), "{m}");
+        assert!(!m.contains("refused the session"), "{m}");
+    }
+
+    /// `auth status` makes no request, so the warning must not send anyone to it.
+    #[test]
+    fn the_unverified_warning_names_what_tests_the_session() {
+        let w = unverified_warning("portal HTTP 503 for /dummy");
+        assert!(
+            w.contains("stored unverified: portal HTTP 503 for /dummy"),
+            "{w}"
+        );
+        assert!(w.contains("`nlnt summary`"), "{w}");
+        assert!(!w.contains("auth status"), "{w}");
+        assert!(
+            w.ends_with("if reads keep failing, run `nlnt auth login --browser --overwrite`."),
+            "{w}"
+        );
+
+        // An error that already names the way out does not name it twice.
+        let blocked = client::guard("/dummy", 403, "text/html", "<html></html>").unwrap_err();
+        let w = unverified_warning(&blocked.to_string());
+        assert!(w.contains("HTTP 403 with an HTML page"), "{w}");
+        assert_eq!(w.matches("reads keep failing").count(), 1, "{w}");
     }
 
     #[test]

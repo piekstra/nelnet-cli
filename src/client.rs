@@ -832,7 +832,9 @@ fn relogin_via_command(
     // portal rejects (a stale token, or an MFA-incomplete `acr`), the raw 401
     // from the verify read is baffling — the user just re-logged in. Translate
     // it into the real cause. Non-auth errors (bot wall, 5xx) pass through.
-    prove_it_reads(cfg, &session, verbose).map_err(rejected_capture)?;
+    prove_it_reads(cfg, &session, verbose)
+        .map_err(nothing_stored)
+        .map_err(rejected_capture)?;
     store_capture(
         lock,
         presented,
@@ -866,12 +868,72 @@ pub fn establish_session(
     verify: bool,
     verbose: bool,
 ) -> Result<(), CliError> {
-    if verify {
-        prove_it_reads(cfg, &session, verbose)?;
+    store_if_proven(
+        || {
+            if verify {
+                prove_it_reads(cfg, &session, verbose)
+            } else {
+                Ok(())
+            }
+        },
+        // Under the lock a renewal holds, so one in flight cannot overwrite this
+        // session with the old one's tokens.
+        || RefreshLock::for_binary(crate::BIN)?.store_signin(|| session.store(creds)),
+    )
+}
+
+/// A value that can be supplied again stores nothing unless the read proves it.
+fn store_if_proven(
+    read: impl FnOnce() -> Result<(), CliError>,
+    store: impl FnOnce() -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    read().map_err(nothing_stored)?;
+    store()
+}
+
+/// A session read out of the sign-in window: **keep it unless the portal refuses
+/// it.** By the time this runs Chrome has stopped and the page's copy is gone, so
+/// not storing it costs the owner another sign-in. Returns why the session is
+/// unverified, if it is.
+pub fn keep_signed_in_session(
+    cfg: &Config,
+    creds: &CredentialStore,
+    session: Session,
+    verbose: bool,
+) -> Result<Option<String>, CliError> {
+    keep_finished_sign_in(
+        || prove_it_reads(cfg, &session, verbose),
+        || RefreshLock::for_binary(crate::BIN)?.store_signin(|| session.store(creds)),
+    )
+}
+
+/// The decision behind [`keep_signed_in_session`]. Only `Auth` is the portal
+/// refusing the session ([`classify_error`]). Anything else, such as a 429, a 5xx, a
+/// dropped connection, a body with no data or an edge block, says nothing about it.
+/// Storing such a session is safe: site storage is cleared before Chrome starts, so
+/// it can only be this sign-in's. A later read settles an outage, not an answer
+/// that repeats, so the warning names [`READS_KEEP_FAILING`].
+fn keep_finished_sign_in(
+    read: impl FnOnce() -> Result<(), CliError>,
+    store: impl FnOnce() -> Result<(), CliError>,
+) -> Result<Option<String>, CliError> {
+    let unverified = match read() {
+        Ok(()) => None,
+        Err(refused @ CliError::Auth(_)) => return Err(refused),
+        Err(inconclusive) => Some(inconclusive.to_string()),
+    };
+    store()?;
+    Ok(unverified)
+}
+
+/// For a route that stores nothing when the read can't prove the session.
+fn nothing_stored(err: CliError) -> CliError {
+    match err {
+        CliError::Upstream(m) => {
+            CliError::Upstream(format!("{}; nothing was stored", without_way_out(&m)))
+        }
+        other => other,
     }
-    // Under the lock a renewal holds, so one in flight cannot overwrite this
-    // session with the old one's tokens.
-    RefreshLock::for_binary(crate::BIN)?.store_signin(|| session.store(creds))
 }
 
 /// A cheap, read-only endpoint that proves the token is accepted.
@@ -883,7 +945,7 @@ fn prove_it_reads(cfg: &Config, session: &Session, verbose: bool) -> Result<(), 
 
 /// A 2xx with nothing in it doesn't show the token was accepted: a stale session
 /// could get an empty body, `null` or `{}`. The overview is a JSON object, so anything but JSON with something in it is
-/// inconclusive, and a session that can't be told from a stale one isn't stored.
+/// inconclusive. The caller decides what that means for the session.
 fn verifying_read_holds_data(path: &str, body: &str) -> Result<(), CliError> {
     let holds_data = match serde_json::from_str::<serde_json::Value>(body) {
         Ok(serde_json::Value::Object(fields)) => !fields.is_empty(),
@@ -894,8 +956,8 @@ fn verifying_read_holds_data(path: &str, body: &str) -> Result<(), CliError> {
         return Ok(());
     }
     Err(CliError::Upstream(format!(
-        "the verifying read of {path} answered with no data, so this session can't be told from \
-         a stale one; nothing was stored"
+        "the verifying read of {path} answered with no data, so it doesn't show the session \
+         was accepted"
     )))
 }
 
@@ -908,6 +970,33 @@ pub fn is_bot_wall(body: &str) -> bool {
         || lower.contains("reference #")
         || lower.contains("edgesuite.net")
         || lower.contains("akamai")
+}
+
+/// Whether a body is an HTML page. The portal's API answers JSON, so an HTML 403
+/// comes from in front of it, whichever vendor's wording it uses.
+fn is_html_page(body: &str) -> bool {
+    body.trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('<')
+}
+
+/// The advice on a refused read, kept apart so a login, with nothing stored to
+/// refresh, can drop it and keep the reason.
+pub const RENEW_ADVICE: &str =
+    "; run `nlnt auth refresh` (or `nlnt auth login --browser --overwrite`)";
+
+/// The way out of an answer a stored session can't get past. Nothing renews on an
+/// edge block, and `auth login` refuses a stored session without `--overwrite`.
+pub const READS_KEEP_FAILING: &str =
+    "if reads keep failing, run `nlnt auth login --browser --overwrite`";
+
+/// A message without [`READS_KEEP_FAILING`], for a caller that words its own way
+/// out, or that has no stored session for reads to fail with.
+pub fn without_way_out(message: &str) -> &str {
+    message
+        .strip_suffix(READS_KEEP_FAILING)
+        .and_then(|m| m.strip_suffix("; "))
+        .unwrap_or(message)
 }
 
 fn bot_wall_error(path: &str) -> CliError {
@@ -930,10 +1019,18 @@ fn classify_error(path: &str, status: u16, body: &str) -> Option<CliError> {
     if status == 403 && is_bot_wall(body) {
         return Some(bot_wall_error(path));
     }
+    // Any other edge block, in wording `is_bot_wall` doesn't know. Renewing would
+    // spend a refresh token on a request the token never reached.
+    if status == 403 && is_html_page(body) {
+        return Some(CliError::Upstream(format!(
+            "blocked in front of the portal on {path}: HTTP 403 with an HTML page rather than \
+             the API's answer, which says nothing about the token; {READS_KEEP_FAILING}"
+        )));
+    }
     if matches!(status, 401 | 403) {
         return Some(CliError::Auth(format!(
-            "portal returned {status} for {path} — the access token is missing or expired; \
-             run `nlnt auth refresh` (or `nlnt auth login --browser --overwrite`)"
+            "portal returned {status} for {path} — the access token is missing or \
+             expired{RENEW_ADVICE}"
         )));
     }
     if status == 404 {
@@ -1014,7 +1111,9 @@ mod tests {
             assert_eq!(e.exit_code(), 5, "{body:?}");
             let m = e.to_string();
             assert!(m.contains("/dummy"), "{m}");
-            assert!(m.contains("nothing was stored"), "{m}");
+            // The window route stores it, so only the piped route may say this.
+            assert!(!m.contains("nothing was stored"), "{m}");
+            assert!(nothing_stored(e).to_string().contains("nothing was stored"));
         }
         verifying_read_holds_data("/dummy", r#"{"dummy":1}"#).unwrap();
     }
@@ -1074,6 +1173,199 @@ mod tests {
         let err = guard("/api/1/loan/overview", 401, "application/json", "{}").unwrap_err();
         assert_eq!(err.exit_code(), 3);
         assert!(err.to_string().contains("auth refresh"));
+    }
+
+    /// A portal on loopback that gives one raw answer to one request, then hangs up.
+    fn portal_answering(raw: String) -> Config {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                match conn.read(&mut chunk) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => request.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = conn.write_all(raw.as_bytes());
+        });
+        Config {
+            base_url: Some(format!("http://127.0.0.1:{port}")),
+            ..Config::default()
+        }
+    }
+
+    /// The real verifying read of a dummy session against that portal.
+    fn verifying_answer(status: u16, content_type: &str, body: &str) -> Result<(), CliError> {
+        let raw = format!(
+            "HTTP/1.1 {status} Dummy\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        prove_it_reads(&portal_answering(raw), &session(), false)
+    }
+
+    /// The connection closes with no answer at all.
+    fn dropped_connection() -> Result<(), CliError> {
+        prove_it_reads(&portal_answering(String::new()), &session(), false)
+    }
+
+    /// Every answer that says nothing about the session, and a word of its reason.
+    fn inconclusive_answers() -> Vec<(Result<(), CliError>, &'static str)> {
+        let json = "application/json";
+        vec![
+            (verifying_answer(429, json, ""), "429"),
+            (verifying_answer(500, json, ""), "500"),
+            (verifying_answer(503, json, ""), "503"),
+            (verifying_answer(200, json, ""), "no data"),
+            (verifying_answer(200, json, "null"), "no data"),
+            (verifying_answer(200, json, "{}"), "no data"),
+            (verifying_answer(200, "text/plain", "not json"), "no data"),
+            (verifying_answer(200, json, "<html></html>"), "HTML"),
+            (verifying_answer(404, json, ""), "404"),
+            (
+                verifying_answer(403, "text/html", "<html>Forbidden</html>"),
+                "HTML page",
+            ),
+            (
+                verifying_answer(403, "text/html", "HTTP 403 Access denied."),
+                "bot protection",
+            ),
+            (dropped_connection(), "failed"),
+        ]
+    }
+
+    fn refusals() -> Vec<Result<(), CliError>> {
+        vec![
+            verifying_answer(401, "application/json", "{}"),
+            verifying_answer(401, "text/plain", ""),
+            verifying_answer(403, "application/json", r#"{"message":"dummy"}"#),
+            verifying_answer(403, "text/plain", ""),
+        ]
+    }
+
+    /// Runs the decision with a store that only records it was called.
+    fn keep(read: Result<(), CliError>) -> (Result<Option<String>, CliError>, bool) {
+        let stored = std::cell::Cell::new(false);
+        let kept = keep_finished_sign_in(
+            || read,
+            || {
+                stored.set(true);
+                Ok(())
+            },
+        );
+        (kept, stored.get())
+    }
+
+    /// Each answer that says nothing about the session stores it, and gives the
+    /// reason for the warning.
+    #[test]
+    fn an_inconclusive_read_keeps_the_finished_sign_in() {
+        for (read, reason) in inconclusive_answers() {
+            let (kept, stored) = keep(read);
+            let why = kept.unwrap().expect("marked unverified");
+            assert!(why.contains(reason), "{reason}: {why}");
+            assert!(stored, "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_definite_refusal_stores_nothing() {
+        for read in refusals() {
+            let (kept, stored) = keep(read);
+            assert_eq!(kept.unwrap_err().exit_code(), 3);
+            assert!(!stored);
+        }
+    }
+
+    /// A value piped in can be piped in again, so only a proven read stores it.
+    #[test]
+    fn the_piped_route_stores_only_a_proven_session() {
+        let piped = |read: Result<(), CliError>| {
+            let stored = std::cell::Cell::new(false);
+            let result = store_if_proven(
+                || read,
+                || {
+                    stored.set(true);
+                    Ok(())
+                },
+            );
+            (result, stored.get())
+        };
+        for (read, reason) in inconclusive_answers() {
+            let code = read.as_ref().unwrap_err().exit_code();
+            let (result, stored) = piped(read);
+            let e = result.unwrap_err();
+            assert_eq!(e.exit_code(), code, "{reason}: {e}");
+            assert!(e.to_string().contains(reason), "{reason}: {e}");
+            if code == 5 {
+                assert!(e.to_string().contains("nothing was stored"), "{e}");
+            }
+            assert!(!stored, "{reason}");
+        }
+        for read in refusals() {
+            let (result, stored) = piped(read);
+            assert_eq!(result.unwrap_err().exit_code(), 3);
+            assert!(!stored);
+        }
+        let (result, stored) = piped(Ok(()));
+        result.unwrap();
+        assert!(stored);
+    }
+
+    #[test]
+    fn a_proven_session_is_stored_with_nothing_to_warn_about() {
+        let (kept, stored) = keep(verifying_answer(200, "application/json", r#"{"dummy":1}"#));
+        assert_eq!(kept.unwrap(), None);
+        assert!(stored);
+    }
+
+    /// The keychain write failing is not an unverified session: the owner must
+    /// hear that nothing was kept.
+    #[test]
+    fn a_failed_store_is_an_error_even_after_an_inconclusive_read() {
+        let e = keep_finished_sign_in(
+            || Err(CliError::Upstream("HTTP 503".into())),
+            || Err(CliError::Keychain("denied".into())),
+        )
+        .unwrap_err();
+        assert!(matches!(e, CliError::Keychain(_)), "{e}");
+    }
+
+    /// An HTML 403 is an edge block: not a refusal of the token, on any read, and
+    /// its reason says so. The API's own 403 stays a refusal.
+    #[test]
+    fn an_html_403_keeps_its_reason_and_is_not_auth() {
+        for body in [
+            "<!DOCTYPE html><title>Blocked</title>",
+            "\u{feff} <html></html>",
+        ] {
+            let err = guard("/dummy", 403, "text/html", body).unwrap_err();
+            assert_eq!(err.exit_code(), 5, "{err}");
+            let m = err.to_string();
+            assert!(m.contains("/dummy"), "{m}");
+            assert!(m.contains("HTTP 403 with an HTML page"), "{m}");
+            assert!(m.contains("says nothing about the token"), "{m}");
+            // Nothing renews on this answer, so the error names the way out.
+            assert!(
+                m.ends_with("; if reads keep failing, run `nlnt auth login --browser --overwrite`"),
+                "{m}"
+            );
+        }
+    }
+
+    /// A piped route has no stored session for reads to fail with.
+    #[test]
+    fn nothing_stored_drops_the_way_out_and_keeps_the_reason() {
+        let blocked = guard("/dummy", 403, "text/html", "<html></html>").unwrap_err();
+        let m = nothing_stored(blocked).to_string();
+        assert!(m.contains("says nothing about the token"), "{m}");
+        assert!(m.ends_with("; nothing was stored"), "{m}");
+        assert!(!m.contains("reads keep failing"), "{m}");
+        assert_eq!(without_way_out("portal HTTP 503"), "portal HTTP 503");
     }
 
     #[test]
