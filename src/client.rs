@@ -280,9 +280,9 @@ impl Portal {
         format!("{}{}", self.base, path)
     }
 
-    /// The refresh token behind this client's access token.
-    pub fn refresh_token(&self) -> Option<&str> {
-        self.session.refresh_token.as_deref()
+    /// The session behind this client's access token.
+    pub fn session(&self) -> &Session {
+        &self.session
     }
 
     fn bearer(&self) -> String {
@@ -483,10 +483,12 @@ pub fn run_capture_command(command: &str, verbose: bool) -> Result<Session, CliE
     Session::parse_captured(&stdout)
 }
 
-/// `Command::output`, stopping the command and anything it started once
-/// `deadline` passes. The pipes are drained on threads, so a chatty command cannot
-/// block on a full one, and a child that exits while something it started still
-/// holds them counts as running.
+/// `Command::output`, stopping the command once `deadline` passes. The pipes are
+/// drained on threads, so a chatty command cannot block on a full one, and a child
+/// that exits while something it started still holds them counts as running.
+///
+/// The command stays in this process's group, so Ctrl-C reaches all of it. That
+/// means the deadline can only stop the command itself.
 fn output_within(
     mut command: std::process::Command,
     deadline: Duration,
@@ -507,11 +509,6 @@ fn output_within(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
     let failed = |e| CliError::Other(format!("failed to run capture command: {e}"));
     let mut child = command.spawn().map_err(failed)?;
     let stdout = drain(child.stdout.take().expect("piped above"));
@@ -521,9 +518,11 @@ fn output_within(
         match child.try_wait().map_err(failed)? {
             Some(status) if stdout.is_finished() && stderr.is_finished() => break status,
             _ if started.elapsed() >= deadline => {
-                stop_with_everything_it_started(&mut child);
-                return Err(CliError::Auth(format!(
-                    "capture command was stopped after running for {deadline:?}"
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CliError::Upstream(format!(
+                    "capture command was stopped after running for {deadline:?}; anything it \
+                     started may still be running, so check that before trying again"
                 )));
             }
             _ => std::thread::sleep(Duration::from_millis(50)),
@@ -542,16 +541,6 @@ fn output_within(
     })
 }
 
-fn stop_with_everything_it_started(child: &mut std::process::Child) {
-    // The child leads its own process group, so the group ID is its pid.
-    #[cfg(unix)]
-    let _ = std::process::Command::new("kill")
-        .args(["-s", "KILL", "--", &format!("-{}", child.id())])
-        .status();
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// Renew the session, preferring the cheap path.
 ///
 /// 1. If a session is stored, exchange its refresh token (no browser).
@@ -565,7 +554,7 @@ pub fn refresh_or_relogin(
     cfg: &Config,
     creds: &CredentialStore,
     command: Option<&str>,
-    presented: Option<&str>,
+    presented: Option<&Session>,
     verbose: bool,
     quiet: bool,
 ) -> Result<Session, CliError> {
@@ -603,6 +592,11 @@ pub fn refresh_or_relogin(
                     }
                     relogin_via_command(cfg, creds, &lock, command, presented, verbose)
                 },
+                || {
+                    if !quiet {
+                        eprintln!("another nlnt process is running the capture command; waiting");
+                    }
+                },
             )
         }
     }
@@ -622,19 +616,25 @@ const CAPTURE_LOCK: &str = "token-capture.lock";
 enum Since {
     /// It is gone: a logout ran while this process waited or captured.
     LoggedOut,
-    /// Its refresh token changed: another process renewed or signed in.
+    /// It changed: another process renewed or signed in.
     Replaced(Session),
     /// Still the same, or there was never one.
     Unchanged(Option<Session>),
 }
 
-fn since_presented(stored: Option<Session>, presented: Option<&str>) -> Since {
+/// The whole session is compared, because a bare bearer string has no refresh token
+/// to tell one session from the next.
+fn since_presented(stored: Option<Session>, presented: Option<&Session>) -> Since {
     match (stored, presented) {
         (None, Some(_)) => Since::LoggedOut,
-        (Some(stored), _) if stored.refresh_token.as_deref() != presented => {
-            Since::Replaced(stored)
+        (Some(stored), Some(presented))
+            if stored.access_token == presented.access_token
+                && stored.refresh_token == presented.refresh_token =>
+        {
+            Since::Unchanged(Some(stored))
         }
-        (stored, _) => Since::Unchanged(stored),
+        (Some(stored), _) => Since::Replaced(stored),
+        (None, None) => Since::Unchanged(None),
     }
 }
 
@@ -658,11 +658,11 @@ fn session_to_renew(
 /// One renewal, safe against every other `nlnt` process. They share one refresh
 /// token, and Duende answers a second use of a retired one by revoking the whole
 /// family (docs/api.md § Token lifetimes). So the session is read again under the
-/// lock, and a stored refresh token other than the one `presented` means another
-/// process renewed while this one waited: its session is used, with no grant.
+/// lock, and a stored session other than the one `presented` means another process
+/// renewed while this one waited: it is used, with no grant.
 fn renew_session(
     lock: &RefreshLock,
-    presented: Option<&str>,
+    presented: Option<&Session>,
     read: impl FnOnce() -> Result<Option<Session>, CliError>,
     renew: impl FnOnce(Option<Session>) -> Result<RefreshPlan, CliError>,
 ) -> Result<RefreshPlan, CliError> {
@@ -679,9 +679,10 @@ fn renew_session(
 /// capture failed, and this process says so rather than spending another code.
 fn capture_once(
     lock: &RefreshLock,
-    presented: Option<&str>,
+    presented: Option<&Session>,
     read: impl Fn() -> Result<Option<Session>, CliError>,
     capture: impl FnOnce() -> Result<Session, CliError>,
+    waiting: impl FnOnce(),
 ) -> Result<Session, CliError> {
     let first = lock.try_hold(|| match since_presented(read()?, presented) {
         Since::LoggedOut => Err(logged_out_meanwhile()),
@@ -691,6 +692,16 @@ fn capture_once(
     if let Some(session) = first {
         return Ok(session);
     }
+    waiting();
+    after_another_capture(lock, presented, read)
+}
+
+/// The waiting half of [`capture_once`].
+fn after_another_capture(
+    lock: &RefreshLock,
+    presented: Option<&Session>,
+    read: impl Fn() -> Result<Option<Session>, CliError>,
+) -> Result<Session, CliError> {
     lock.hold(|| match since_presented(read()?, presented) {
         Since::LoggedOut => Err(logged_out_meanwhile()),
         Since::Replaced(session) => Ok(session),
@@ -706,7 +717,7 @@ fn capture_once(
 /// sign-in's newer session stays, and a logout stays a logout.
 fn store_capture(
     lock: &RefreshLock,
-    presented: Option<&str>,
+    presented: Option<&Session>,
     captured: Session,
     read: impl FnOnce() -> Result<Option<Session>, CliError>,
     store: impl FnOnce(&Session) -> Result<(), CliError>,
@@ -721,14 +732,10 @@ fn store_capture(
     })
 }
 
-/// The refresh token stored now, for an explicit `auth refresh`, which has no
-/// failed read to compare against.
-pub fn stored_refresh_token(creds: &CredentialStore) -> Result<Option<String>, CliError> {
-    match Session::from_keychain(creds) {
-        Ok(session) => Ok(session.refresh_token),
-        Err(CliError::Auth(_)) => Ok(None),
-        Err(e) => Err(e),
-    }
+/// The session stored now, for an explicit `auth refresh`, which has no failed
+/// read to compare against.
+pub fn stored_session(creds: &CredentialStore) -> Result<Option<Session>, CliError> {
+    session_to_renew(|| Session::from_keychain(creds), true)
 }
 
 /// What [`refresh_or_relogin`] should do, given the refresh-token outcome and
@@ -773,7 +780,7 @@ fn relogin_via_command(
     creds: &CredentialStore,
     lock: &RefreshLock,
     command: &str,
-    presented: Option<&str>,
+    presented: Option<&Session>,
     verbose: bool,
 ) -> Result<Session, CliError> {
     let session = run_capture_command(command, verbose)?;
@@ -1107,7 +1114,7 @@ mod tests {
                     start.wait();
                     renew_session(
                         &RefreshLock::at(path),
-                        Some("dummy-refresh-1"),
+                        Some(&holding("dummy-refresh-1")),
                         || Ok(Some(stored.lock().unwrap().clone())),
                         |session| {
                             let spent = session.unwrap().refresh_token.unwrap();
@@ -1139,7 +1146,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plan = renew_session(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             || Ok(Some(holding("dummy-refresh-2"))),
             |_| panic!("another process renewed: no grant"),
         )
@@ -1155,7 +1162,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = renew_session(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             || Ok(None),
             |_| panic!("logged out: no grant and no capture"),
         )
@@ -1188,7 +1195,7 @@ mod tests {
             .hold(|| {
                 let err = renew_session(
                     &lock,
-                    Some("dummy-refresh-1"),
+                    Some(&holding("dummy-refresh-1")),
                     || panic!("no read without the lock"),
                     |_| panic!("no grant without the lock"),
                 )
@@ -1210,14 +1217,17 @@ mod tests {
         assert!(session_to_renew(down, true).is_err());
     }
 
+    fn no_wait() {}
+
     #[test]
     fn first_in_line_runs_the_capture() {
         let dir = tempfile::tempdir().unwrap();
         let session = capture_once(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             || Ok(Some(holding("dummy-refresh-1"))),
             || Ok(holding("dummy-from-the-capture")),
+            || panic!("the lock is free"),
         )
         .unwrap();
         assert_eq!(
@@ -1231,9 +1241,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = capture_once(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             || Ok(Some(holding("dummy-refresh-2"))),
             || panic!("another process captured: no second capture"),
+            no_wait,
         )
         .unwrap();
         assert_eq!(session.refresh_token.as_deref(), Some("dummy-refresh-2"));
@@ -1244,42 +1255,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = capture_once(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             || Ok(None),
             || panic!("logged out: no capture"),
+            no_wait,
         )
         .unwrap_err();
         assert_eq!(err.exit_code(), 3, "{err}");
     }
 
-    /// Runs `capture_once` while this test holds the capture lock, as another
-    /// process's capture would, and releases it once the contender is waiting.
-    fn waiting_on_another_capture(stored_after: Session) -> Result<Session, CliError> {
+    #[test]
+    fn a_capture_already_running_is_never_joined_by_another() {
         let dir = tempfile::tempdir().unwrap();
-        let lock = RefreshLock::at(dir.path().join("token-capture.lock"));
-        lock.hold(|| {
-            let contender = {
-                let lock = lock.clone();
-                std::thread::spawn(move || {
-                    capture_once(
-                        &lock,
-                        Some("dummy-refresh-1"),
-                        || Ok(Some(stored_after.clone())),
-                        || panic!("another process is capturing: no second capture"),
-                    )
-                })
-            };
-            std::thread::sleep(Duration::from_millis(200));
-            Ok(contender)
-        })
-        .unwrap()
-        .join()
-        .unwrap()
+        let lock = a_lock(&dir);
+        RefreshLock::at(lock.path())
+            .hold(|| {
+                let waited = std::cell::Cell::new(false);
+                let err = capture_once(
+                    &lock,
+                    Some(&holding("dummy-refresh-1")),
+                    || Ok(Some(holding("dummy-refresh-1"))),
+                    || panic!("another process is capturing: no second capture"),
+                    || waited.set(true),
+                )
+                .unwrap_err();
+                assert!(waited.get(), "the wait is announced");
+                assert_eq!(err.exit_code(), 5, "bounded by the lock's wait: {err}");
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
-    fn waiting_on_a_failed_capture_does_not_run_another() {
-        let err = waiting_on_another_capture(holding("dummy-refresh-1")).unwrap_err();
+    fn after_a_failed_capture_another_is_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = after_another_capture(&a_lock(&dir), Some(&holding("dummy-refresh-1")), || {
+            Ok(Some(holding("dummy-refresh-1")))
+        })
+        .unwrap_err();
         assert_eq!(err.exit_code(), 3, "{err}");
         assert!(
             err.to_string().contains("did not spend another code"),
@@ -1288,8 +1301,13 @@ mod tests {
     }
 
     #[test]
-    fn waiting_on_a_good_capture_uses_its_session() {
-        let session = waiting_on_another_capture(holding("dummy-refresh-2")).unwrap();
+    fn after_a_good_capture_its_session_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let session =
+            after_another_capture(&a_lock(&dir), Some(&holding("dummy-refresh-1")), || {
+                Ok(Some(holding("dummy-refresh-2")))
+            })
+            .unwrap();
         assert_eq!(session.refresh_token.as_deref(), Some("dummy-refresh-2"));
     }
 
@@ -1299,7 +1317,7 @@ mod tests {
         let mut wrote = None;
         let session = store_capture(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             holding("dummy-from-the-capture"),
             || Ok(Some(holding("dummy-refresh-1"))),
             |session| {
@@ -1320,7 +1338,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = store_capture(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             holding("dummy-from-the-capture"),
             || Ok(Some(holding("dummy-from-the-login"))),
             |_| panic!("the login's session stays"),
@@ -1337,7 +1355,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = store_capture(
             &a_lock(&dir),
-            Some("dummy-refresh-1"),
+            Some(&holding("dummy-refresh-1")),
             holding("dummy-from-the-capture"),
             || Ok(None),
             |_| panic!("the logout stays"),
@@ -1364,6 +1382,42 @@ mod tests {
         assert!(wrote);
     }
 
+    fn bare(access: &str) -> Session {
+        Session {
+            access_token: access.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A bare bearer string has no refresh token to tell one session from the next.
+    #[test]
+    fn a_capture_does_not_undo_the_logout_of_a_bare_token_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = store_capture(
+            &a_lock(&dir),
+            Some(&bare("dummy-bearer-1")),
+            holding("dummy-from-the-capture"),
+            || Ok(None),
+            |_| panic!("the logout stays"),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 3, "{err}");
+    }
+
+    #[test]
+    fn a_capture_does_not_overwrite_a_bare_token_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = store_capture(
+            &a_lock(&dir),
+            Some(&bare("dummy-bearer-1")),
+            holding("dummy-from-the-capture"),
+            || Ok(Some(bare("dummy-bearer-2"))),
+            |_| panic!("the login's session stays"),
+        )
+        .unwrap();
+        assert_eq!(session.access_token, "dummy-bearer-2");
+    }
+
     #[cfg(unix)]
     fn sh(script: &str) -> std::process::Command {
         let mut sh = std::process::Command::new("sh");
@@ -1386,26 +1440,28 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_capture_past_its_deadline_is_stopped_with_what_it_started() {
+    fn a_capture_past_its_deadline_is_stopped_and_exits_5() {
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("outlived-the-deadline");
-        let script = format!("(sleep 1; touch '{}') & wait", marker.display());
-        let started = std::time::Instant::now();
-        let err = output_within(sh(&script), Duration::from_millis(200)).unwrap_err();
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "not stopped in time"
-        );
-        assert_eq!(err.exit_code(), 3, "{err}");
+        let pidfile = dir.path().join("pid");
+        let script = format!("echo $$ > '{}'; exec sleep 30", pidfile.display());
+        let err = output_within(sh(&script), Duration::from_secs(2)).unwrap_err();
+        assert_eq!(err.exit_code(), 5, "{err}");
         assert!(err.to_string().contains("stopped"), "{err}");
-        std::thread::sleep(Duration::from_millis(1300));
-        assert!(!marker.exists(), "what the command started kept running");
+        assert!(err.to_string().contains("may still be running"), "{err}");
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the command was stopped and reaped");
     }
 
     #[cfg(unix)]
     #[test]
     fn a_background_child_holding_the_pipes_counts_as_running() {
-        let err = output_within(sh("sleep 30 &"), Duration::from_millis(200)).unwrap_err();
+        let err = output_within(sh("sleep 5 &"), Duration::from_millis(200)).unwrap_err();
         assert!(err.to_string().contains("stopped"), "{err}");
     }
 

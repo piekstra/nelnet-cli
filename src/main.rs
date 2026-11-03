@@ -293,7 +293,9 @@ fn auth(
                     "a session is already stored; pass --overwrite to replace it".into(),
                 ));
             }
-            RefreshLock::for_binary(BIN)?.before_signin()?;
+            // Before the read: a secret piped in once cannot be read again. It does
+            // not wait on a busy lock, so bad input still fails at once.
+            RefreshLock::for_binary(BIN)?.try_hold(|| Ok(()))?;
             let secret = args.source.read(None)?;
             let session = Session::parse_captured(secret.expose())?;
             // Verify with a live read before storing, same as `auth login`:
@@ -357,12 +359,15 @@ fn login(
     }
     let browser = args.browser.browser;
     let retry = retry_command(browser, login.overwrite);
-    // Before anyone signs in or a session is read from stdin: either can only
-    // be done once, and the write needs this lock.
-    RefreshLock::for_binary(BIN)?.before_signin()?;
+    let lock = RefreshLock::for_binary(BIN)?;
     let raw = if browser {
+        // Before anyone signs in: the write needs this lock.
+        lock.before_signin()?;
         nlnt::browser::capture_session(cli.common.quiet, &retry)?
     } else {
+        // Before the read: a session piped in once cannot be read again. It does
+        // not wait on a busy lock, so bad input still fails at once.
+        lock.try_hold(|| Ok(()))?;
         let prompt = if login.non_interactive {
             None
         } else {
@@ -460,12 +465,12 @@ fn refresh(
         .filter(|s| !s.trim().is_empty())
         .or_else(|| cfg.refresh_command());
 
-    let presented = client::stored_refresh_token(creds)?;
+    let presented = client::stored_session(creds)?;
     let refreshed = client::refresh_or_relogin(
         cfg,
         creds,
         command.as_deref(),
-        presented.as_deref(),
+        presented.as_ref(),
         cli.common.verbose,
         cli.common.quiet,
     )?;

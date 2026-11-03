@@ -130,7 +130,9 @@ cannot spend a code or lock the account. Still:
   the refresh lock so a login or logout never waits on a capture. A process that
   finds it held waits, uses what that capture stored, and if nothing was stored
   fails rather than spending another code. A capture is stopped after 5 minutes,
-  and a sign-in's or logout's result stands over a capture that finishes later.
+  though anything it started may keep running; it stays in `nlnt`'s process group
+  so Ctrl-C reaches all of it. A sign-in's or logout's result stands over a capture
+  that finishes later.
 - The unattended full-login path burns a real MFA code; the capture script
   prefers silent renewal (persistent profile) precisely to avoid that.
 

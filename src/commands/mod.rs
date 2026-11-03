@@ -15,7 +15,7 @@ use pk_cli_core::{CliError, CommonArgs};
 use pk_cli_secrets::CredentialStore;
 use serde_json::Value;
 
-use crate::client::Portal;
+use crate::client::{Portal, Session};
 use crate::config::Config;
 
 pub use pk_cli_core::output::{rows_of as items, table_view};
@@ -49,16 +49,16 @@ impl Ctx<'_> {
             // token that `refresh_session` just wrote to the keychain.
             || {
                 let portal = self.client()?;
-                presented.replace(portal.refresh_token().map(String::from));
+                presented.replace(Some(portal.session().clone()));
                 op(&portal)
             },
-            || self.refresh_session(presented.borrow().as_deref()),
+            || self.refresh_session(presented.borrow().as_ref()),
         )
     }
 
-    /// `presented` is the refresh token behind the access token that just
-    /// failed, so a renewal can tell whether another process got there first.
-    fn refresh_session(&self, presented: Option<&str>) -> Result<(), CliError> {
+    /// `presented` is the session whose access token just failed, so a renewal can
+    /// tell whether another process got there first.
+    fn refresh_session(&self, presented: Option<&Session>) -> Result<(), CliError> {
         if !self.cfg.auto_refresh() {
             return Err(CliError::Auth(
                 "access token expired — run `nlnt auth refresh` (auto_refresh is off)".into(),

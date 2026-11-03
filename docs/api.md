@@ -216,7 +216,8 @@ exit 5 naming the lock, with nothing sent. A capture command runs outside that l
 under `token-capture.lock` beside it, so one runs at a time and a login or logout
 never waits on one. A process that finds it held waits for that capture and uses its
 session; if it stored none, that process fails rather than spending another one-time
-code. A capture is stopped after 5 minutes, with anything it started. The unattended capture script
+code. A capture is stopped after 5 minutes, exit 5, though anything it started may keep
+running. The unattended capture script
 sidesteps this by re-minting from the browser only when asked (a short-lived
 headless launch that exits), rather than holding a competing refresh token; and
 when a revocation *does* happen, the next command's capture-command fallback
