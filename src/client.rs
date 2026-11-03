@@ -291,6 +291,13 @@ impl Portal {
 
     /// GET a JSON path and return the body, after the auth/bot guard.
     pub fn get_text(&self, path: &str) -> Result<String, CliError> {
+        let answer = self.answer(path)?;
+        guard(path, answer.status, &answer.content_type, &answer.body)?;
+        Ok(answer.body)
+    }
+
+    /// GET a JSON path and return what came back, before anything judges it.
+    fn answer(&self, path: &str) -> Result<Answer, CliError> {
         let url = self.url(path);
         if self.verbose {
             eprintln!("GET {url}");
@@ -312,8 +319,11 @@ impl Portal {
         let body = resp
             .text()
             .map_err(|e| CliError::Upstream(format!("reading response body for {path}: {e}")))?;
-        guard(path, status, &content_type, &body)?;
-        Ok(body)
+        Ok(Answer {
+            status,
+            content_type,
+            body,
+        })
     }
 
     /// Download bytes, requiring positive confirmation that it really is a PDF.
@@ -900,11 +910,43 @@ pub fn keep_signed_in_session(
     creds: &CredentialStore,
     session: Session,
     verbose: bool,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<Unverified>, CliError> {
     keep_finished_sign_in(
-        || prove_it_reads(cfg, &session, verbose),
+        || verifying_read(cfg, &session, verbose),
         || RefreshLock::for_binary(crate::BIN)?.store_signin(|| session.store(creds)),
     )
+}
+
+/// What the portal answered, before anything judges it.
+struct Answer {
+    status: u16,
+    content_type: String,
+    body: String,
+}
+
+/// Why a kept session is unverified.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unverified {
+    pub reason: String,
+    /// The answer was a block on this client rather than a word about the session,
+    /// so a new sign-in may not clear it.
+    pub edge_block: bool,
+}
+
+/// A verifying read that didn't accept the session.
+#[derive(Debug)]
+struct FailedRead {
+    error: CliError,
+    edge_block: bool,
+}
+
+impl From<CliError> for FailedRead {
+    fn from(error: CliError) -> Self {
+        FailedRead {
+            error,
+            edge_block: false,
+        }
+    }
 }
 
 /// The decision behind [`keep_signed_in_session`]. Only `Auth` is the portal
@@ -915,13 +957,19 @@ pub fn keep_signed_in_session(
 /// that repeats, so the warning names a way out ([`READS_KEEP_FAILING`],
 /// [`EDGE_BLOCK_WAY_OUT`]).
 fn keep_finished_sign_in(
-    read: impl FnOnce() -> Result<(), CliError>,
+    read: impl FnOnce() -> Result<(), FailedRead>,
     store: impl FnOnce() -> Result<(), CliError>,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<Unverified>, CliError> {
     let unverified = match read() {
         Ok(()) => None,
-        Err(refused @ CliError::Auth(_)) => return Err(refused),
-        Err(inconclusive) => Some(inconclusive.to_string()),
+        Err(FailedRead {
+            error: refused @ CliError::Auth(_),
+            ..
+        }) => return Err(refused),
+        Err(FailedRead { error, edge_block }) => Some(Unverified {
+            reason: error.to_string(),
+            edge_block,
+        }),
     };
     store()?;
     Ok(unverified)
@@ -939,9 +987,33 @@ fn nothing_stored(err: CliError) -> CliError {
 
 /// A cheap, read-only endpoint that proves the token is accepted.
 fn prove_it_reads(cfg: &Config, session: &Session, verbose: bool) -> Result<(), CliError> {
+    verifying_read(cfg, session, verbose).map_err(|failed| failed.error)
+}
+
+/// [`prove_it_reads`], saying whether a failure was an edge block. That comes from
+/// the answer rather than the message, so rewording an error can't change it.
+fn verifying_read(cfg: &Config, session: &Session, verbose: bool) -> Result<(), FailedRead> {
+    let path = paths::OVERVIEW;
     let portal = Portal::with_session(cfg.base_url(), session.clone(), verbose)?;
-    let body = portal.get_text(paths::OVERVIEW)?;
-    verifying_read_holds_data(paths::OVERVIEW, &body)
+    let answer = portal.answer(path)?;
+    guard(path, answer.status, &answer.content_type, &answer.body)
+        .and_then(|()| verifying_read_holds_data(path, &answer.body))
+        .map_err(|error| FailedRead {
+            error,
+            edge_block: is_edge_answer(answer.status, &answer.content_type, &answer.body),
+        })
+}
+
+/// An answer from something in front of the API, which never judged the session.
+/// A `401` and a `404` are the portal's own.
+fn is_edge_answer(status: u16, content_type: &str, body: &str) -> bool {
+    let html = is_html_page(body);
+    match status {
+        401 | 404 => false,
+        403 => html || is_bot_wall(body),
+        200..=299 => html,
+        _ => html && content_type.contains("application/json"),
+    }
 }
 
 /// A 2xx with nothing in it doesn't show the token was accepted: a stale session
@@ -1008,13 +1080,6 @@ pub const EDGE_BLOCK_WAY_OUT: &str = "a new sign-in may not clear this, because 
 const BOT_WALL_WAY_OUT: &str = "a new sign-in won't clear this, because the block is on this \
      client rather than the session; wait or try another network";
 
-/// Whether a message reports a block on this client rather than on the session.
-pub fn is_edge_block(message: &str) -> bool {
-    [EDGE_BLOCK_WAY_OUT, BOT_WALL_WAY_OUT]
-        .iter()
-        .any(|way_out| message.ends_with(way_out))
-}
-
 /// A message without its way out, for a caller that words its own, or that has no
 /// stored session for reads to fail with.
 pub fn without_way_out(message: &str) -> &str {
@@ -1071,7 +1136,7 @@ pub fn guard(path: &str, status: u16, content_type: &str, body: &str) -> Result<
     }
     // JSON was promised and HTML arrived: an Akamai interstitial or an error
     // page. Treat as upstream, not success.
-    if content_type.contains("application/json") && body.trim_start().starts_with('<') {
+    if content_type.contains("application/json") && is_html_page(body) {
         return Err(CliError::Upstream(format!(
             "portal returned HTML instead of JSON for {path} (edge error or challenge); \
              {EDGE_BLOCK_WAY_OUT}"
@@ -1134,11 +1199,8 @@ mod tests {
             "<html></html>",
         ] {
             let e = verifying_read_holds_data("/dummy", body).unwrap_err();
-            assert_eq!(
-                is_edge_block(&e.to_string()),
-                body.starts_with('<'),
-                "{body:?}"
-            );
+            let names_the_edge = e.to_string().ends_with(EDGE_BLOCK_WAY_OUT);
+            assert_eq!(names_the_edge, body.starts_with('<'), "{body:?}");
             assert_eq!(e.exit_code(), 5, "{body:?}");
             let m = e.to_string();
             assert!(m.contains("/dummy"), "{m}");
@@ -1198,7 +1260,6 @@ mod tests {
         assert!(err.to_string().contains("bot protection"));
         assert!(!err.to_string().contains("auth login"));
         assert!(err.to_string().ends_with(BOT_WALL_WAY_OUT));
-        assert!(is_edge_block(&err.to_string()));
     }
 
     #[test]
@@ -1280,11 +1341,52 @@ mod tests {
         ]
     }
 
+    /// The warning's wording follows the answer itself, whatever the message says.
+    #[test]
+    fn the_verifying_read_names_an_edge_block_by_its_answer() {
+        let json = "application/json";
+        for (status, kind, body, edge) in [
+            (403, "text/html", "<html>Forbidden</html>", true),
+            (403, "text/html", "HTTP 403 Access denied.", true),
+            (200, json, "<html></html>", true),
+            (200, "text/html", "\u{feff}<html></html>", true),
+            (503, json, "<html></html>", true),
+            (429, json, "", false),
+            (503, "text/html", "<html></html>", false),
+            (200, json, "{}", false),
+            (200, "text/plain", "not json", false),
+            (404, "text/html", "<html></html>", false),
+        ] {
+            let raw = format!(
+                "HTTP/1.1 {status} Dummy\r\ncontent-type: {kind}\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let failed = verifying_read(&portal_answering(raw), &session(), false).unwrap_err();
+            assert_eq!(failed.edge_block, edge, "{status} {kind} {body:?}");
+        }
+        let dropped = verifying_read(&portal_answering(String::new()), &session(), false);
+        assert!(!dropped.unwrap_err().edge_block);
+    }
+
+    #[test]
+    fn a_kept_session_says_whether_the_read_was_an_edge_block() {
+        let blocked = FailedRead {
+            error: CliError::Upstream("dummy".into()),
+            edge_block: true,
+        };
+        let kept = keep_finished_sign_in(|| Err(blocked), || Ok(()))
+            .unwrap()
+            .unwrap();
+        assert!(kept.edge_block);
+        assert_eq!(kept.reason, CliError::Upstream("dummy".into()).to_string());
+    }
+
     /// Runs the decision with a store that only records it was called.
-    fn keep(read: Result<(), CliError>) -> (Result<Option<String>, CliError>, bool) {
+    fn keep(read: Result<(), CliError>) -> (Result<Option<Unverified>, CliError>, bool) {
         let stored = std::cell::Cell::new(false);
         let kept = keep_finished_sign_in(
-            || read,
+            || read.map_err(FailedRead::from),
             || {
                 stored.set(true);
                 Ok(())
@@ -1299,7 +1401,7 @@ mod tests {
     fn an_inconclusive_read_keeps_the_finished_sign_in() {
         for (read, reason) in inconclusive_answers() {
             let (kept, stored) = keep(read);
-            let why = kept.unwrap().expect("marked unverified");
+            let why = kept.unwrap().expect("marked unverified").reason;
             assert!(why.contains(reason), "{reason}: {why}");
             assert!(stored, "{reason}");
         }
@@ -1361,7 +1463,7 @@ mod tests {
     #[test]
     fn a_failed_store_is_an_error_even_after_an_inconclusive_read() {
         let e = keep_finished_sign_in(
-            || Err(CliError::Upstream("HTTP 503".into())),
+            || Err(CliError::Upstream("HTTP 503".into()).into()),
             || Err(CliError::Keychain("denied".into())),
         )
         .unwrap_err();
@@ -1384,7 +1486,6 @@ mod tests {
             assert!(m.contains("says nothing about the token"), "{m}");
             // Nothing renews on this answer, so the error names the way out.
             assert!(m.ends_with(&format!("; {EDGE_BLOCK_WAY_OUT}")), "{m}");
-            assert!(is_edge_block(&m), "{m}");
         }
     }
 
