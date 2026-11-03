@@ -138,7 +138,8 @@ async function fetchOtp() {
       const m = text.match(/\b(\d{6})\b/);
       if (m) return m[1];
     } catch (e) {
-      log('otp command:', e.message);
+      // execSync's error message quotes the command, which may hold a credential.
+      log('otp command failed:', e.status ?? e.signal ?? e.code ?? 'unknown');
     }
     await new Promise((r) => setTimeout(r, 5000)); // mail lands a few seconds late
   }
@@ -222,7 +223,10 @@ async function fullLogin(page) {
     for (const s of selectors) {
       const el = await page.$(s);
       if (el) {
-        await el.fill(value);
+        // main() logs an error's message, and Playwright's can quote what it was filling.
+        await el.fill(value).catch(() => {
+          throw new Error(`could not fill ${s}`);
+        });
         return true;
       }
     }
