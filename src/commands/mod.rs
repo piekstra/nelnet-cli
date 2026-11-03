@@ -20,6 +20,15 @@ use crate::config::Config;
 
 pub use pk_cli_core::output::{rows_of as items, table_view};
 
+/// What a lapsed access token says when `auto_refresh` is off.
+pub const AUTO_REFRESH_OFF: &str =
+    "access token expired — run `nlnt auth refresh` (auto_refresh is off)";
+
+/// A lapsed access token when `auto_refresh` is off.
+pub fn auto_refresh_off() -> CliError {
+    CliError::Auth(AUTO_REFRESH_OFF.into())
+}
+
 /// Everything a command needs: the global flags, resolved config, and the
 /// keychain handle.
 pub struct Ctx<'a> {
@@ -43,6 +52,24 @@ impl Ctx<'_> {
     /// here. The refresh spends no one-time code and needs no browser: it
     /// exchanges the stored refresh token.
     pub fn read<T>(&self, op: impl Fn(&Portal) -> Result<T, CliError>) -> Result<T, CliError> {
+        self.read_renewing(op, self.cfg.refresh_command().as_deref())
+    }
+
+    /// [`Self::read`], for a caller that must not start a sign-in: it renews with
+    /// the stored refresh token and never runs the capture command, so a dead
+    /// refresh token is an auth error.
+    pub fn read_without_capture<T>(
+        &self,
+        op: impl Fn(&Portal) -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        self.read_renewing(op, None)
+    }
+
+    fn read_renewing<T>(
+        &self,
+        op: impl Fn(&Portal) -> Result<T, CliError>,
+        capture: Option<&str>,
+    ) -> Result<T, CliError> {
         let presented = RefCell::new(None);
         with_reauth(
             // Rebuilt per attempt so the retry picks up the freshly-refreshed
@@ -52,17 +79,19 @@ impl Ctx<'_> {
                 presented.replace(Some(portal.session().clone()));
                 op(&portal)
             },
-            || self.refresh_session(presented.borrow().as_ref()),
+            || self.refresh_session(presented.borrow().as_ref(), capture),
         )
     }
 
     /// `presented` is the session whose access token just failed, so a renewal can
     /// tell whether another process got there first.
-    fn refresh_session(&self, presented: Option<&Session>) -> Result<(), CliError> {
+    fn refresh_session(
+        &self,
+        presented: Option<&Session>,
+        capture: Option<&str>,
+    ) -> Result<(), CliError> {
         if !self.cfg.auto_refresh() {
-            return Err(CliError::Auth(
-                "access token expired — run `nlnt auth refresh` (auto_refresh is off)".into(),
-            ));
+            return Err(auto_refresh_off());
         }
         if !self.common.quiet {
             eprintln!("access token expired — refreshing");
@@ -73,7 +102,7 @@ impl Ctx<'_> {
         crate::client::refresh_or_relogin(
             self.cfg,
             self.creds,
-            self.cfg.refresh_command().as_deref(),
+            capture,
             presented,
             self.common.verbose,
             self.common.quiet,

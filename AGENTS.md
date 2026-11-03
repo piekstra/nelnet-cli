@@ -11,8 +11,8 @@ surface and libraries live in
 there before changing the command surface**; do not reconstruct the spec from
 this repo's code, it drifts.
 
-Every `pk-cli-*` crate is pinned to the same `cli-common` revision (see
-`Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`,
+Every `pk-cli-*` crate is pinned to the same `cli-common` revision, **v0.21.0**
+(see `Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`,
 whose kept profile needs cli-common v0.16.0 or later and whose site-storage
 clearing and `profile_exists` need v0.19.0. Renewals take `pk-cli-auth`'s
 `refresh_lock`, which needs Rust 1.89.
@@ -57,6 +57,9 @@ make install  # install to ~/.cargo/bin, dev-signed
 | `src/client.rs` | Bearer HTTP session, sentinel headers, token refresh, the auth/bot guards, `%PDF` check, **the endpoint map** |
 | `src/browser.rs` | the `auth login --browser` capture: start URL, the one host it reads, the `localStorage` expression, the profile choice |
 | `src/parse.rs` | responses → DTOs; all provider field knowledge |
+| `src/parse/checked.rs` | the same fields for `nlnt mcp`, where an unreadable answer is an error rather than an empty list or a `0.00` |
+| `src/mcp.rs` | `nlnt mcp`: five read-only tools over a `Reads` seam with `get_text` and nothing else, asking only for `&'static str` paths (`LiveSource` on the portal, fixtures in `src/mcp/tests.rs`) |
+| `packaging/mcpb/manifest.json` | the Claude Desktop extension; `tests/packaging.rs` holds it to the binary |
 | `src/model.rs` | `LoanSummary`, `Loan`, `Transaction`, `TaxInfo` DTOs |
 | `src/config.rs` | non-secret settings, keychain account names |
 | `src/commands/` | one module per command group, plus `Ctx` and the reauth wiring |

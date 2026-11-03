@@ -21,7 +21,8 @@
 //! defaulted `$0.00`: a fabricated zero accrued interest reads as good news in
 //! this household's paydown workflow. Absent *optional* fields are simply
 //! omitted. Parsers over list endpoints are total with respect to junk input:
-//! unrecognized JSON yields an empty list, never a panic.
+//! unrecognized JSON yields an empty list, never a panic. The [`checked`] readers,
+//! which `nlnt mcp` uses, name a missing field instead.
 
 use pk_cli_core::{CliError, Money};
 use pk_cli_documents::Document;
@@ -211,17 +212,21 @@ fn enrich_summary(s: &mut LoanSummary, v: &Value) {
 
     if let Some(groups) = acct.get("borrowerGroupPayments").and_then(|g| g.as_array()) {
         s.loan_count = groups.len() as u32;
-        // Repayment plan and recertification are the same across active groups;
-        // take them from the first group that states them.
-        for g in groups {
-            if s.repayment_plan.is_none() {
-                s.repayment_plan = as_text(g, "repaymentPlan");
-            }
-            if s.idr_recertification_date.is_none() {
-                s.idr_recertification_date = as_date(g, "recertificationDate");
-            }
-        }
+        let (plan, recertification) = plan_of(groups);
+        s.repayment_plan = plan;
+        s.idr_recertification_date = recertification;
     }
+}
+
+/// Repayment plan and recertification are the same across active groups; take
+/// them from the first group that states them.
+fn plan_of(groups: &[Value]) -> (Option<String>, Option<String>) {
+    (
+        groups.iter().find_map(|g| as_text(g, "repaymentPlan")),
+        groups
+            .iter()
+            .find_map(|g| as_date(g, "recertificationDate")),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +495,8 @@ pub fn tax(body: &str, path: &str) -> Result<TaxInfo, CliError> {
     t.form_correction = dict.and_then(|d| as_text(d, "TaxFormCorrection"));
     Ok(t)
 }
+
+pub mod checked;
 
 #[cfg(test)]
 mod tests {

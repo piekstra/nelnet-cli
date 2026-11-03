@@ -2,6 +2,32 @@
 
 Earlier releases are described on the GitHub releases page.
 
+## v0.3.0 — 2026-11-03
+
+- `nlnt mcp`: read-only tools for Claude, `nelnet_loans`, `nelnet_payments`,
+  `nelnet_repayment`, `nelnet_tax` and `nelnet_documents`. They run over stdio for
+  Claude Code and Claude Desktop, and with `--http` on 127.0.0.1 behind a bearer token
+  for Claude on the web and mobile through your own Cloudflare Worker and tunnel. No
+  tool can make a payment or change anything at Nelnet, and a test holds every request
+  a tool makes to a list of nine reads.
+- A server reads the config and keychain on each call and renews under the same
+  `RefreshLock` as every other `nlnt`. A tool never signs in, and does not run
+  `refresh_command`.
+- A tool says what it does not know: an answer of the wrong shape is an error, a figure
+  Nelnet did not state is absent rather than `0.00`, and no document title or account
+  number appears in a result.
+- Releases attach `nlnt-<version>.mcpb`, a Claude Desktop extension, for macOS and Linux.
+  There is no Windows build; `SECURITY.md` says why.
+- `auth logout --forget` also removes the `mcp --http` bearer token.
+- `Portal::refresh` writes the stored session back before it spends the refresh token,
+  so a keychain prompt or refusal comes while that token can still be used.
+- `self-update` says to restart a running `nlnt mcp --http` and to install the new
+  `.mcpb`.
+- A failure that got no answer from the portal no longer prints its URL.
+- `documents list --tax-year` no longer reads a year out of a longer run of digits in a
+  title.
+- cli-common v0.21.0, up from v0.20.0.
+
 ## v0.2.3 — 2026-11-03
 
 - An edge block no longer offers a new sign-in as the first fix, because the block is

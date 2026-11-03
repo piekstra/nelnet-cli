@@ -149,6 +149,7 @@ same interest total and *is* a real PDF.
 | `nlnt auth refresh\|status\|logout\|set-credential` | Session refresh, state, and credential management |
 | `nlnt config path\|show\|set\|unset` | Non-secret settings |
 | `nlnt api GET <PATH>` | Raw read-only passthrough |
+| `nlnt mcp` | Serve read-only tools to Claude over MCP; see [Use with Claude](#use-with-claude) |
 | `nlnt info` | Machine discovery (`cli-info/v1`) |
 | `nlnt self-update [--check]` | Update from GitHub releases |
 | `nlnt completions <shell>` | Shell completions |
@@ -187,7 +188,9 @@ filtering by date returns the wrong form.
 | `refresh_command` | Capture command for unattended re-login. Env `NLNT_REFRESH_COMMAND`. |
 
 Secrets are **never** stored here — the OAuth token bundle (access + refresh
-token) and the portal password live in the macOS keychain under `piekstra.nlnt`.
+token) and the portal password live in the macOS keychain under `piekstra.nlnt`,
+as does the bearer token of `nlnt mcp --http`, which can also come from
+`$NLNT_MCP_TOKEN`.
 
 ## Exit codes
 
@@ -204,7 +207,7 @@ token) and the portal password live in the macOS keychain under `piekstra.nlnt`.
 ## Read-only, and how that is enforced
 
 `nlnt` implements no write operation. `nlnt api` refuses any method but `GET`
-with exit 6. On a loan servicer the write endpoints move real money, so that
+with exit 6, and `nlnt mcp` serves read-only tools alone. On a loan servicer the write endpoints move real money, so that
 refusal is policy rather than an unfinished feature. If a write is ever added,
 this claim must change in the same commit.
 
@@ -212,6 +215,95 @@ A statement download only reports success when the bytes actually begin with
 `%PDF-`. Without that check an error body (JSON, or an edge interstitial) would
 be written to disk under a `.pdf` name with a "Saved" message — feeding a
 non-document into an archive.
+
+## Use with Claude
+
+`nlnt mcp` serves five read-only tools over MCP, so Claude can answer questions about
+your own student loans. There is no hosted service: the tools run on your computer, in
+your copy of `nlnt`, and call Nelnet with the session in your OS keychain.
+
+| Tool | Answers |
+| --- | --- |
+| `nelnet_loans` | What do I owe? Total principal, accrued interest and payoff, and each loan group's type, status, rate and balances, narrowed by `loan_type` |
+| `nelnet_payments` | What did I pay, and how much reached principal? Payments by `since`/`until`, or upcoming ones with `scheduled` |
+| `nelnet_repayment` | What is due next? Status, plan, next payment, recertification date, autopay enrollment and income-driven applications |
+| `nelnet_tax` | What goes on the 1098-E line? Nelnet's running total of deductible interest, with its as-of date |
+| `nelnet_documents` | Has a statement arrived? Published documents by date and category, narrowed by `category`, `tax_year` or `since`/`until` (`category: "tax"` is `documents list --tax`), with no file contents; `nlnt documents download <id>` saves one |
+
+No tool can make or schedule a payment, change autopay or a repayment plan, or change
+anything at Nelnet: there is no such tool, the tools have no verb but `GET`, they ask
+only for fixed paths, and `--allow-writes` adds nothing.
+
+Results are concise by default (`response_format: "detailed"` adds ids and provider
+detail), 25 records a page with a cursor for more, and never larger than about 32,000
+characters. No result carries an account number or a bank account's tail, and a document
+goes by date and category because Nelnet's titles embed an identifier. A figure Nelnet
+did not state is absent rather than `0.00`, and an answer the tools cannot read is an
+error rather than an empty list. `nelnet_repayment` still answers when Nelnet does not
+answer for autopay or income-driven applications, and its `note` says which. Text in a
+result comes from Nelnet; the server tells Claude to treat it as data, not instructions.
+
+The tools are worded for a model, so they differ from `--json` in two ways. Amounts are
+plain decimal strings where `--json` has `Money` objects. And a payment's `type` is
+Nelnet's payment type only, where `nlnt transactions list --json` falls back to the
+benefit status for `kind`.
+
+**Sign in first.** Sign-in is through a browser, so no settings form can hold it. Run
+`nlnt auth login --browser` in a terminal. Both ways of connecting Claude below then use
+that session from the OS keychain (service `piekstra.nlnt`), and renew the access token
+in place, as the commands do, under the same lock as every other `nlnt`. When the refresh
+token dies, the tools say so and ask you to run `nlnt auth login --browser --overwrite`
+in a terminal. They never sign in by themselves, and they do not run `refresh_command`,
+because that would drive a browser on a model's call. A running command still does.
+
+**Claude Code.** Add the `nelnet-cli` plugin from the
+[piekstra plugin marketplace](https://github.com/piekstra/claude-plugins):
+
+```console
+$ claude plugin marketplace add piekstra/claude-plugins
+$ claude plugin install nelnet-cli@piekstra-plugins
+```
+
+**Claude Desktop.** Download `nlnt-<version>.mcpb` from the
+[latest release](https://github.com/piekstra/nelnet-cli/releases/latest) and open it.
+It asks for nothing: the bundled `nlnt` reads what your installed `nlnt` stored. On
+macOS the bundled binary is a different program to the keychain, so its first call
+raises a keychain prompt to read the `piekstra.nlnt` session, and its first renewal one
+to write it back; choose **Always Allow** for each, or every call will ask again. A new
+version of the extension is a new program to the keychain, and can ask again. While a
+prompt waits for you, tool calls answer that one may be waiting. There is no Windows
+build; [`SECURITY.md`](SECURITY.md) says why.
+
+Any other MCP client that launches a local server can run `nlnt mcp`.
+
+**Claude on the web and mobile.** claude.ai reaches tools through a remote connector,
+and your Nelnet session stays on your computer, so `nlnt` serves the same tools from
+your computer to a connector you deploy into your own Cloudflare account:
+
+```console
+$ nlnt mcp --new-token            # once: a bearer token, saved in the keychain and printed for the Worker
+$ nlnt mcp --http --port 8737     # serve on 127.0.0.1 only
+```
+
+The connector, [cli-common's `connector/`](https://github.com/piekstra/cli-common/tree/main/connector#tools-from-your-computer-home-modules),
+reaches that port through a Cloudflare Tunnel in your account; its README walks through
+the tunnel, the VPC service, a launchd agent that keeps the server running, and the
+`HOME_NELNET_TOKEN` secret, with the threat model. `--http` binds 127.0.0.1 only,
+refuses to start without the token, refuses any request whose `Host` is not loopback
+or that carries an `Origin`, and serves the read-only tools only. The Nelnet session
+never leaves your computer, but tool results do: your balances, payments and repayment
+details pass through Cloudflare and reach Claude ([`SECURITY.md`](SECURITY.md)). While
+the computer sleeps, the tools answer that it is offline.
+
+After `nlnt self-update`, restart the server: a running one keeps the old code, and its
+launchd agent restarts it only when it exits. Its start line names the version.
+
+```console
+$ launchctl kickstart -k gui/$(id -u)/com.piekstra.nlnt-mcp-http
+```
+
+`self-update` does not reach a Claude Desktop extension, which runs its own copy.
+Install the new release's `.mcpb` too.
 
 ## Development
 

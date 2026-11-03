@@ -158,17 +158,13 @@ pub fn undownloadable(doc: &Document) -> Option<String> {
 ///
 /// Scans for a plausible year rather than any four digits, so an account number
 /// or a form number ("1098") in the title is not mistaken for one.
-fn title_year(name: &str) -> Option<u32> {
-    let chars: Vec<char> = name.chars().collect();
-    for window in chars.windows(4) {
-        if window.iter().all(|c| c.is_ascii_digit()) {
-            let year: u32 = window.iter().collect::<String>().parse().ok()?;
-            if (1998..=2100).contains(&year) {
-                return Some(year);
-            }
-        }
-    }
-    None
+pub fn title_year(name: &str) -> Option<u32> {
+    // Exactly four digits: a statement's title embeds an identifier, and a year-like
+    // stretch inside that is not a year.
+    name.split(|c: char| !c.is_ascii_digit())
+        .filter(|run| run.len() == 4)
+        .filter_map(|run| run.parse().ok())
+        .find(|year| (1998..=2100).contains(year))
 }
 
 /// Why a download cannot proceed, if it cannot.
@@ -461,6 +457,13 @@ mod tests {
         assert_eq!(title_year("2025 Form 1098-E"), Some(2025));
         assert_eq!(title_year("Form 1098-E"), None);
         assert_eq!(title_year("June Statement"), None);
+    }
+
+    /// Dummy digits, with a year-like stretch inside them.
+    #[test]
+    fn title_year_ignores_a_year_inside_a_longer_run() {
+        assert_eq!(title_year("STMT-1202512-June.pdf"), None);
+        assert_eq!(title_year("STMT-1202512-2026-01-31.pdf"), Some(2026));
     }
 
     /// When the title names no year, fall back to the publication date.

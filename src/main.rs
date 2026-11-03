@@ -16,6 +16,7 @@ use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
 use nlnt::client::{self, Session};
 use nlnt::commands::{autopay, documents, loans, repayment, summary, tax, transactions, Ctx};
 use nlnt::config::{Config, SESSION_ACCOUNT};
+use nlnt::mcp::{LiveSource, NelnetTools};
 use nlnt::{BIN, REPO};
 
 /// Nelnet student-loan servicing from the command line — balances, accrued
@@ -57,6 +58,13 @@ enum Command {
     Documents(documents::Cmd),
     /// Raw portal passthrough (read-only: GET requests only).
     Api(ApiArgs),
+    /// Serve read-only Nelnet tools to Claude over MCP (stdio, or --http).
+    ///
+    /// For Claude Code (`claude mcp add nelnet -- nlnt mcp`), Claude Desktop and any
+    /// MCP client. With --http, on 127.0.0.1 behind a bearer token, for your own
+    /// Cloudflare Worker (see README). No tool can make a payment or change
+    /// anything at Nelnet, and no tool signs in.
+    Mcp(pk_cli_mcp::McpArgs),
     /// Update to the latest release from GitHub.
     SelfUpdate(SelfUpdateArgs),
     /// Print a shell completion script.
@@ -113,7 +121,7 @@ enum AuthCmd {
     Refresh(RefreshArgs),
     /// Report credential and session state (auth-status/v1).
     Status,
-    /// Clear the session and remove the kept browser profile; --forget also clears saved settings.
+    /// Clear the session and remove the kept browser profile; --forget also clears saved settings and the `mcp --http` bearer token.
     ///
     /// Every step is attempted, so one failing does not stop the rest. If a step
     /// fails, or a sign-in or a Chrome window is using the profile, this exits
@@ -170,6 +178,12 @@ fn main() {
 fn run(cli: &Cli) -> Result<(), CliError> {
     let store = ConfigStore::new(BIN);
     let creds = CredentialStore::for_binary(BIN);
+    // Before anything reads the config: listing the tools reads no file, and a
+    // running server reads it on each call, so a later `config set` applies and a
+    // malformed file is one tool's error rather than no server.
+    if let Command::Mcp(args) = &cli.command {
+        return pk_cli_mcp::run(args, NelnetTools::new(LiveSource::new(creds)));
+    }
     dispatch(cli, &store, &creds, &|store, forget| {
         run_logout(
             &cli.common,
@@ -179,10 +193,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             // cannot store the session again after the logout. The delete runs
             // either way: the lock must not keep a credential on the machine.
             || RefreshLock::forget_for_binary(BIN, || creds.delete(SESSION_ACCOUNT)),
+            || creds.delete(MCP_TOKEN_ACCOUNT),
             || pk_cli_browser::forget_profile(BIN),
         )
     })
 }
+
+/// The keychain item `mcp --new-token` saves the `--http` bearer token in.
+const MCP_TOKEN_ACCOUNT: &str = "mcp-http-token";
 
 /// `auth logout`, passed in so a test can run the dispatch without the keychain
 /// or the real browser profile.
@@ -216,13 +234,19 @@ fn dispatch(
         Command::Tax => with_ctx(&|ctx| tax::run(ctx)),
         Command::Documents(cmd) => with_ctx(&|ctx| documents::run(ctx, cmd)),
         Command::Api(args) => with_ctx(&|ctx| api(ctx, args)),
+        Command::Mcp(_) => unreachable!("served before dispatch"),
         Command::SelfUpdate(args) => Updater {
             repo: REPO.into(),
             binary: BIN.into(),
             target: env!("BUILD_TARGET").into(),
             current: env!("CARGO_PKG_VERSION").into(),
         }
-        .run(args, cli.common.json, cli.common.quiet),
+        .run_noting(
+            args,
+            cli.common.json,
+            cli.common.quiet,
+            &pk_cli_mcp::restart_note(BIN),
+        ),
         Command::Completions { shell } => {
             clap_complete::generate(*shell, &mut Cli::command(), BIN, &mut std::io::stdout());
             Ok(())
@@ -246,6 +270,7 @@ fn dispatch(
                     "tax",
                     "documents",
                     "api",
+                    "mcp",
                 ],
             )
             .with_profiles(&[pk_cli_documents::PROFILE]);
@@ -369,17 +394,24 @@ fn browser_profile_status(
 /// `auth logout`, with the keychain and the real profile passed in. Every step
 /// runs whatever the one before it did: the steps come first and the profile last,
 /// and `logout_browser` reports each. Clearing the file needs no parse, so
-/// `--forget` also clears a config that can't be read.
+/// `--forget` also clears a config that can't be read, and the bearer token of `mcp
+/// --http`. A plain logout leaves that token, because a server keeps it across a
+/// sign-out and a new sign-in, and `SECURITY.md` says so.
 fn run_logout(
     common: &CommonArgs,
     store: &ConfigStore,
     forget: bool,
     delete_session: impl FnOnce() -> Result<bool, CliError>,
+    delete_http_token: impl FnOnce() -> Result<bool, CliError>,
     remove_profile: impl FnOnce() -> Result<bool, BrowserError>,
 ) -> Result<(), CliError> {
     let mut steps: Vec<LogoutStep> = vec![("the session", delete_session().map(drop))];
     if forget {
         steps.push(("the saved settings", store.clear().map(drop)));
+        steps.push((
+            "the connector's bearer token",
+            delete_http_token().map(drop),
+        ));
     }
     let line = logout_browser(steps, remove_profile)?;
     if !common.quiet {
@@ -1125,6 +1157,7 @@ mod tests {
         };
         let deleted = std::cell::Cell::new(0);
         let removed = std::cell::Cell::new(0);
+        let tokens = std::cell::Cell::new(0);
         let common = parse(&["auth", "logout"]).common;
         let seam = |store: &ConfigStore, forget: bool| {
             run_logout(
@@ -1136,6 +1169,10 @@ mod tests {
                     Ok(true)
                 },
                 || {
+                    tokens.set(tokens.get() + 1);
+                    Ok(true)
+                },
+                || {
                     removed.set(removed.get() + 1);
                     Ok(false)
                 },
@@ -1144,6 +1181,11 @@ mod tests {
 
         dispatch(&parse(&["auth", "logout"]), &store, &creds, &seam).unwrap();
         assert_eq!((deleted.get(), removed.get()), (1, 1));
+        assert_eq!(
+            tokens.get(),
+            0,
+            "a plain logout leaves the connector's token"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
 
         // The commands that read the config still say it's broken.
@@ -1158,7 +1200,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!((deleted.get(), removed.get()), (2, 2));
+        assert_eq!(tokens.get(), 1, "--forget removes the connector's token");
         assert!(!path.exists());
+    }
+
+    /// The failure is named, so the owner knows that token still opens the connector.
+    #[test]
+    fn a_forget_that_could_not_remove_the_connector_token_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(BIN).with_override(Some(dir.path().join("config.json")));
+        let common = Cli::try_parse_from(["nlnt", "auth", "logout"])
+            .unwrap()
+            .common;
+        let e = run_logout(
+            &common,
+            &store,
+            true,
+            || Ok(true),
+            || Err(CliError::Keychain("denied".into())),
+            || Ok(false),
+        )
+        .unwrap_err();
+        let m = e.to_string();
+        assert!(m.contains("the connector's bearer token"), "{m}");
+        assert!(m.contains("`nlnt auth logout --forget` again"), "{m}");
     }
 
     /// A captured value the parser refuses is the portal's shape changing
