@@ -27,19 +27,42 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
 - **The browser profile is kept on disk between sign-ins.** It lives at
   `~/Library/Application Support/piekstra.nlnt/browser-profile` on macOS and
   under `$XDG_DATA_HOME` or `~/.local/share` on Linux, and a launch is refused
-  when it is a symlink, another user's or not `0700`. It holds the identity
-  host's cookies (`idsrv`, the remembered device), which is the trade for fewer
-  sign-ins. Chrome encrypts its cookies at rest (on macOS with the "Chrome Safe
-  Storage" key in the login keychain). `localStorage` is protected only by the
-  directory's mode, so the capture removes the token bundle from it as it reads
-  it: the profile is not meant to hold a refresh token after a sign-in. A window
-  killed before Chrome writes that removal can leave one, and `auth logout`
-  removes it with the profile. While `idsrv` lasts (observed ~1 hour), anyone
-  who can run a browser in this profile can mint a new session.
+  when it is a symlink, another user's or not `0700`. It is a full Chrome
+  profile, which is the trade for fewer sign-ins. It holds:
+  - the identity host's cookies (`idsrv`, the remembered device);
+  - browsing history with full URLs, query strings included;
+  - the HTTP cache, for whatever the responses allow: loan balances and payment
+    history among it, if those pages load in the window;
+  - `localStorage`, IndexedDB and other site storage;
+  - any password you let Chrome save.
+
+  Chrome encrypts its cookies at rest (on macOS with the "Chrome Safe Storage"
+  key in the login keychain). That does not cover the history, the HTTP cache or
+  site storage, so the directory's `0700` mode is their only protection. The
+  directory sits where ordinary user-level backups usually look, so exclude it
+  from any backup you don't want holding this.
+- **What this portal leaves in the history.** The sign-in's OIDC redirects stay
+  there with their query strings, the one-time authorization code and state
+  among them, until `auth logout`. The window closes as soon as the session is
+  read, which limits what else loads in it; a statement opened there would stay
+  in the cache too, and a statement can carry an SSN. Use `--fresh-profile` to
+  view anything in that window.
+- **The refresh token.** The capture removes the token bundle from `localStorage`
+  as it reads it: the profile is not meant to hold a refresh token after a
+  sign-in. A window killed before Chrome writes that removal can leave one, and
+  `auth logout` removes it with the profile. While `idsrv` lasts (observed ~1
+  hour), anyone who can run a browser in this profile can mint a new session.
+- **The profile outlives a failed sign-in.** A timeout, a closed window or Ctrl-C
+  stores nothing in the keychain, but the profile stays with what the sign-in
+  got as far as, and the error says so. `auth status` reads only the keychain and
+  config, so it does not show the profile.
 - **`auth logout` removes the kept profile**, that directory and nothing else, as
-  its last step. It refuses (exit 1, with the keychain session already cleared)
-  while a sign-in or a Chrome is using the profile, or when the path is a symlink
-  or another user's. `auth login --browser --fresh-profile` runs one sign-in in a
+  its last step; it clears the stored session too, and there is no way to remove
+  the profile alone. It refuses while a sign-in or a Chrome is using the profile,
+  or when the path is a symlink or another user's. A refusal is exit 1, and its
+  message says the session (and, with `--forget`, the saved settings) is already
+  cleared, that only the profile remains and how to finish.
+- `auth login --browser --fresh-profile` runs one sign-in in a
   scratch profile instead (`0700`, created exclusively under an unpredictable
   name in the temp dir, removed when the window closes), leaving the kept one
   alone. `scripts/nlnt-capture.mjs` keeps its own separate profile

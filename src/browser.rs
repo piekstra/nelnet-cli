@@ -16,14 +16,26 @@
 //! profile outlives the window. Refresh tokens rotate with reuse detection
 //! (`docs/api.md` § Token lifetimes): a copy left in the profile goes stale at
 //! the CLI's next refresh, and the next window would hand it over, or the SPA
-//! would present it and revoke the CLI's whole token family. So the profile
-//! keeps the cookies and never the tokens.
+//! would present it and revoke the CLI's whole token family.
+//!
+//! That covers the bundle and nothing else. It is a full Chrome profile, kept
+//! until `auth logout`, a failed sign-in included: besides the cookies it holds
+//! browsing history with full URLs, query strings included (so the sign-in's
+//! OIDC redirects, with their authorization code and state), the HTTP cache and
+//! site storage. Chrome's cookie encryption does not cover those, so `0700` is
+//! their only protection.
 
 use pk_cli_browser::{BrowserError, Capture, HostRule, Launch, DEFAULT_TIMEOUT};
 use pk_cli_core::CliError;
 use pk_cli_secrets::Secret;
 
 use crate::BIN;
+
+/// What a sign-in that gave up leaves behind, for its error. Nothing reaches the
+/// keychain, but the kept profile stays with whatever the sign-in got as far as.
+const PROFILE_STAYS: &str = "The browser profile stays on disk with what this sign-in left in it; \
+                             `nlnt auth logout` removes it and clears any stored session with \
+                             it, and `--fresh-profile` signs in without it.";
 
 /// The page the sign-in window opens at. The SPA sends the owner on to the
 /// identity host to sign in and stores the bundle once it is back.
@@ -84,19 +96,28 @@ pub fn capture_session(
         &session_capture()?,
         DEFAULT_TIMEOUT,
     )
-    .map_err(browser_error)?;
+    .map_err(|e| browser_error(e, fresh_profile))?;
     captured
         .into_value()
         .ok_or_else(|| CliError::Other("the browser capture read no session".into()))
 }
 
-/// Without Chrome, point at the manual path instead of a dead end.
-fn browser_error(e: BrowserError) -> CliError {
+/// Without Chrome, point at the manual path instead of a dead end. After a
+/// timeout, a closed window or a Ctrl-C, say that the kept profile stays; a
+/// `--fresh-profile` sign-in has already removed its scratch one. The exit codes
+/// are the crate's.
+fn browser_error(e: BrowserError, fresh_profile: bool) -> CliError {
     match e {
         BrowserError::ChromeNotFound(m) => CliError::Other(format!(
             "{m}; or sign in at {START_URL} in any browser and import the session by hand \
              (`{BIN} auth login --help`)"
         )),
+        BrowserError::TimedOut(m) | BrowserError::WindowClosed(m) if !fresh_profile => {
+            CliError::Auth(format!("{m} {PROFILE_STAYS}"))
+        }
+        BrowserError::Canceled if !fresh_profile => {
+            CliError::Other(format!("{e}. {PROFILE_STAYS}"))
+        }
         other => other.into(),
     }
 }
@@ -154,7 +175,10 @@ mod tests {
 
     #[test]
     fn a_missing_chrome_points_at_the_manual_path() {
-        let e = browser_error(BrowserError::ChromeNotFound("no Chrome found".into()));
+        let e = browser_error(
+            BrowserError::ChromeNotFound("no Chrome found".into()),
+            false,
+        );
         assert_eq!(e.exit_code(), 1);
         let m = e.to_string();
         assert!(m.starts_with("no Chrome found"), "{m}");
@@ -163,8 +187,26 @@ mod tests {
 
     #[test]
     fn a_timeout_keeps_the_family_exit_code() {
-        let e = browser_error(BrowserError::TimedOut("timed out".into()));
+        let e = browser_error(BrowserError::TimedOut("timed out.".into()), true);
         assert_eq!(e.exit_code(), 3);
+        // A scratch profile is already gone, so there is nothing to mention.
+        assert_eq!(e.to_string(), "timed out.");
+    }
+
+    #[test]
+    fn a_failed_sign_in_says_the_kept_profile_stays() {
+        let cases = [
+            (BrowserError::TimedOut("timed out.".into()), 3),
+            (BrowserError::WindowClosed("closed.".into()), 3),
+            (BrowserError::Canceled, 1),
+        ];
+        for (error, code) in cases {
+            let e = browser_error(error, false);
+            assert_eq!(e.exit_code(), code, "{e}");
+            let m = e.to_string();
+            assert!(m.contains("browser profile stays on disk"), "{m}");
+            assert!(m.contains("`nlnt auth logout` removes it"), "{m}");
+        }
     }
 
     /// The readiness signal and the parser agree: what the expression lets

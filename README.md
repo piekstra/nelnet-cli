@@ -66,12 +66,24 @@ The window runs in a Chrome profile `nlnt` **keeps on disk** between sign-ins
 macOS, `$XDG_DATA_HOME/piekstra.nlnt/browser-profile` or
 `~/.local/share/piekstra.nlnt/browser-profile` on Linux), so Nelnet's cookies
 carry over and a later sign-in may need less input: no one-time code on a device
-Nelnet remembers. It keeps the cookies, not the tokens: `nlnt` removes the
-session from the page as it reads it. The trade is a profile holding Nelnet's
-cookies on your disk. `nlnt auth logout` removes it; it refuses while a sign-in or
-a Chrome window is using the profile, so close the window and log out again.
-`nlnt auth login --browser --fresh-profile` signs in once through a scratch
-profile, deleted afterwards, and leaves the kept one alone.
+Nelnet remembers. `nlnt auth login --browser --fresh-profile` signs in once
+through a scratch profile, deleted afterwards, and leaves the kept one alone.
+
+The trade is more than cookies. `nlnt` removes the token bundle from the page as
+it reads it, but this is a full Chrome profile, so it also keeps browsing history
+with full URLs, query strings included, the HTTP cache and site storage, for
+whatever loads in that window. Chrome's cookie encryption does not cover those:
+the directory's `0700` mode is their only protection, and ordinary backups
+usually include the directory ([`SECURITY.md`](SECURITY.md)). The sign-in's OIDC
+redirects stay in the history, query strings and all. **Use `--fresh-profile` if
+you view loan or statement pages in that window.**
+
+The profile stays after a failed sign-in too, and a timeout, a closed window or
+Ctrl-C says so. `nlnt auth status` reads only the keychain and config, so it does
+not show the profile. `nlnt auth logout` removes it and clears the stored session with it.
+While a sign-in or a Chrome window is using the profile, logout clears the
+session, exits 1 and says only the profile remains; close the window and run it
+again.
 
 The session carries a refresh token, so this is a **one-time sign-in**: `nlnt`
 renews the short-lived access token itself (`nlnt auth refresh`, or

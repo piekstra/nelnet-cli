@@ -270,6 +270,16 @@ fn login_help_leads_with_the_browser() {
     assert!(short.contains("--fresh-profile"), "{short}");
 }
 
+#[test]
+fn logout_help_says_a_refusal_leaves_only_the_profile() {
+    let out = nlnt().args(["auth", "logout", "--help"]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("1 with the rest already cleared"),
+        "{stdout}"
+    );
+}
+
 /// `--fresh-profile` chooses the browser's profile, so it means nothing without
 /// `--browser`: a usage error before the keychain is read or a window opens.
 #[test]

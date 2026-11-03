@@ -4,14 +4,18 @@ Earlier releases are described on the GitHub releases page.
 
 ## v0.2.0 — 2026-11-03
 
-cli-common v0.16.0: the browser sign-in keeps its Chrome profile.
+cli-common v0.17.0, which needs Rust 1.89: the browser sign-in keeps its Chrome
+profile (v0.16.0).
 
 - `nlnt auth login --browser` runs Chrome in a profile `nlnt` keeps on disk
   (`<data dir>/piekstra.nlnt/browser-profile`, owner-only), where it used to run
   in a scratch profile deleted after every sign-in. Nelnet's cookies carry over,
-  so a later sign-in may need less input. The trade is a profile holding those
-  cookies on disk; SECURITY.md has the details. How much input it saves is
-  unverified against the live portal.
+  so a later sign-in may need less input. The trade is a full Chrome profile on
+  disk: cookies, and history with query strings, HTTP cache and site storage,
+  which Chrome's cookie encryption does not cover (SECURITY.md). How much input
+  it saves is unverified against the live portal.
+- A timeout, a closed window or Ctrl-C now says the kept profile stays and that
+  `nlnt auth logout` removes it.
 - The capture now removes the token bundle from `localStorage` as it reads it,
   and removes without reading one already past its `expires_at`. Refresh tokens
   rotate with reuse detection, so a copy left in the kept profile could revoke
@@ -19,6 +23,7 @@ cli-common v0.16.0: the browser sign-in keeps its Chrome profile.
 - `nlnt auth login --browser --fresh-profile` signs in once through a scratch
   profile, deleted afterwards, leaving the kept one alone. A failed login's
   retry command repeats the flag.
-- `nlnt auth logout` also removes the kept profile, as its last step. It exits 1
-  with the session already cleared while a sign-in or a Chrome window is using
-  the profile, or when the profile needs repair; the message says what to do.
+- `nlnt auth logout` also removes the kept profile, as its last step. While a
+  sign-in or a Chrome window is using the profile, or when it needs repair, it
+  exits 1, and the message says the session (and, with `--forget`, the saved
+  settings) is already cleared, that only the profile remains and how to finish.

@@ -13,7 +13,8 @@ this repo's code, it drifts.
 
 Every `pk-cli-*` crate is pinned to the same `cli-common` revision (see
 `Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`,
-whose kept profile needs cli-common v0.16.0 or later, and which needs Rust 1.85.
+whose kept profile needs cli-common v0.16.0 or later. cli-common v0.17.0's
+`pk-cli-auth` needs Rust 1.89.
 
 ## The single most important fact
 
@@ -117,7 +118,11 @@ cannot spend a code or lock the account. Still:
   below. `auth logout` removes the profile last, through `logout_browser`'s
   closure: the binary binds `pk_cli_browser::forget_profile`, tests bind
   `forget_profile_in` under a temp dir. **No test may reach the owner's real
-  profile.**
+  profile.** It is a full Chrome profile that outlives even a failed sign-in
+  (SECURITY.md lists its contents), so the errors for a timeout, a closed window
+  and Ctrl-C name it (`browser_error`), and a refused removal names what logout
+  already cleared (`refused_profile_removal`). `auth status` cannot report it
+  until `pk-cli-browser` can say whether it exists; don't recompute its path here.
 - `with_reauth` retries **once** and never loops. The recovery step is
   `client::refresh_or_relogin`: exchange the refresh token, and only if that is
   dead run the configured `refresh_command` (the reference capture script in

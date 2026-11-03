@@ -108,8 +108,9 @@ enum AuthCmd {
     Refresh(RefreshArgs),
     /// Report credential and session state (auth-status/v1).
     Status,
-    /// Clear the cached session and remove the kept browser profile; --forget
-    /// also clears saved settings.
+    /// Clear the cached session, then remove the kept browser profile; --forget
+    /// also clears saved settings. While Chrome is using the profile this exits
+    /// 1 with the rest already cleared and only the profile left.
     Logout(LogoutArgs),
     /// Write a session bundle to the keychain (rotation / scripted setup).
     ///
@@ -283,7 +284,7 @@ fn auth(
                 store.clear()?;
             }
             // Last, so a refusal (its window still open) leaves the rest done.
-            let line = logout_browser(|| pk_cli_browser::forget_profile(BIN))?;
+            let line = logout_browser(args.forget, || pk_cli_browser::forget_profile(BIN))?;
             if !cli.common.quiet {
                 eprintln!("{line}");
             }
@@ -314,13 +315,16 @@ fn auth(
 }
 
 /// `auth logout`'s browser step. The profile `auth login --browser` keeps holds
-/// the identity host's cookies (its remembered device and session), so a logout
-/// removes it too and the next sign-in starts signed out. The removal is passed
-/// in: the binary binds it to `forget_profile(BIN)`, the tests to
-/// `forget_profile_in` under a temp dir, so a test never removes the owner's
-/// real profile. Returns the status line.
-fn logout_browser(forget: impl FnOnce() -> Result<bool, BrowserError>) -> Result<String, CliError> {
-    let removed = forget()?;
+/// the identity host's cookies (its remembered device and session) and the rest
+/// of a Chrome profile, so a logout removes it too and the next sign-in starts
+/// signed out. The removal is passed in: the binary binds it to
+/// `forget_profile(BIN)`, the tests to `forget_profile_in` under a temp dir, so
+/// a test never removes the owner's real profile. Returns the status line.
+fn logout_browser(
+    forget: bool,
+    remove_profile: impl FnOnce() -> Result<bool, BrowserError>,
+) -> Result<String, CliError> {
+    let removed = remove_profile().map_err(|e| refused_profile_removal(e, forget))?;
     Ok(format!(
         "logged out{}",
         if removed {
@@ -328,6 +332,25 @@ fn logout_browser(forget: impl FnOnce() -> Result<bool, BrowserError>) -> Result
         } else {
             ""
         }
+    ))
+}
+
+/// The browser step runs last, so when it is refused the rest of the logout is
+/// already done. A caller seeing exit 1 must be able to tell that the session is
+/// gone, and what is left to do.
+fn refused_profile_removal(error: BrowserError, forget: bool) -> CliError {
+    let cleared = if forget {
+        "the session and the saved settings are cleared"
+    } else {
+        "the session is cleared"
+    };
+    let finish = match error {
+        BrowserError::ProfileInUse(_) => "Once that window or sign-in is closed, run",
+        _ => "Repair or delete that path, then run",
+    };
+    CliError::Other(format!(
+        "partly logged out: {cleared} and only the browser profile remains. {error}. {finish} \
+         `{BIN} auth logout` again to remove it."
     ))
 }
 
@@ -567,30 +590,52 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let profile = root.path().join("piekstra.nlnt").join("browser-profile");
         std::fs::create_dir_all(profile.join("Default")).unwrap();
-        let forget = || pk_cli_browser::forget_profile_in(root.path(), BIN);
+        let remove = || pk_cli_browser::forget_profile_in(root.path(), BIN);
         assert_eq!(
-            logout_browser(forget).unwrap(),
+            logout_browser(false, remove).unwrap(),
             "logged out; browser profile removed"
         );
         assert!(!profile.exists());
         // No profile left: nothing to remove, and not an error.
-        assert_eq!(logout_browser(forget).unwrap(), "logged out");
+        assert_eq!(logout_browser(false, remove).unwrap(), "logged out");
     }
 
-    /// A profile in use or needing repair is refused with the crate's own
-    /// message (what to close, or what to fix) and exit 1, never reported as
-    /// logged out.
+    /// A profile in use or needing repair is exit 1, and the message says what
+    /// is already gone, what remains, the crate's reason and how to finish.
     #[test]
-    fn a_refused_profile_removal_is_an_error_not_a_logout() {
-        let refusals = [
-            BrowserError::ProfileInUse("a Chrome (pid 7) is still running in x".into()),
-            BrowserError::Profile("the browser profile dir x is a symlink".into()),
+    fn a_refused_profile_removal_says_what_is_already_cleared() {
+        let in_use = || BrowserError::ProfileInUse("a Chrome (pid 7) is in x".into());
+        let repair = || BrowserError::Profile("the browser profile dir x is a symlink".into());
+        let cases = [
+            (
+                in_use(),
+                false,
+                "the session is cleared",
+                "window or sign-in",
+            ),
+            (
+                in_use(),
+                true,
+                "the session and the saved settings are cleared",
+                "window or sign-in",
+            ),
+            (
+                repair(),
+                false,
+                "the session is cleared",
+                "Repair or delete",
+            ),
         ];
-        for refusal in refusals {
+        for (refusal, forget, cleared, finish) in cases {
             let shown = refusal.to_string();
-            let err = logout_browser(|| Err(refusal)).unwrap_err();
+            let err = logout_browser(forget, || Err(refusal)).unwrap_err();
             assert_eq!(err.exit_code(), 1, "{err}");
-            assert!(err.to_string().contains(&shown), "{err}");
+            let m = err.to_string();
+            assert!(m.contains(cleared), "{m}");
+            assert!(m.contains("only the browser profile remains"), "{m}");
+            assert!(m.contains(&shown), "{m}");
+            assert!(m.contains(finish), "{m}");
+            assert!(m.contains("`nlnt auth logout` again"), "{m}");
         }
     }
 
