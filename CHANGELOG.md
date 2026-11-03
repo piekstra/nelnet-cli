@@ -27,4 +27,7 @@ profile (v0.16.0).
 - `nlnt auth logout` also removes the kept profile, as its last step. It attempts
   every step even when one fails. If one fails, or a sign-in or a Chrome window is
   using the profile, it exits with the first failure's code, and the message says
-  what was cleared, what remains and how to finish.
+  what was cleared, what remains and how to finish. A config file that can't be
+  parsed no longer stops it, and `--forget` clears that file.
+- The verifying read at login must return data. An empty body, `null` or `{}` is now
+  exit 5 with nothing stored, since a stale session could get one.

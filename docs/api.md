@@ -121,8 +121,12 @@ What follows from it:
   the window has opened leaves it in place (a timeout, a closed window, Ctrl-C, a
   refused verifying read, a bundle the parser refuses, a failed keychain write),
   and the error says so and names `nlnt auth logout`. `auth status` does not report it.
+- The verifying read must return data. An empty body, `null`, `{}` or anything else
+  that isn't JSON with something in it is exit 5 with nothing stored, since a stale
+  session from the kept profile could get one.
 - `auth logout` removes the kept profile as its last step, and attempts every step
-  even when one fails. A failed step, or a sign-in or a Chrome using the profile,
+  even when one fails, or when the config can't be parsed (`--forget` clears that
+  file). A failed step, or a sign-in or a Chrome using the profile,
   exits non-zero with the first failure's code, naming what was cleared, what
   remains and how to finish. The capture script's profile below is a
   separate one, which logout does not touch.

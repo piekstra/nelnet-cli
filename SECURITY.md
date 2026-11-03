@@ -64,6 +64,8 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   its last step; it clears the stored session too, and there is no way to remove
   the profile alone. Every step is attempted even when an earlier one fails, so a
   denied keychain prompt or an unwritable config does not leave the profile behind.
+  A config file that can't be parsed doesn't stop it either, and `--forget` clears
+  that file.
   The removal refuses while a sign-in or a Chrome is using the profile, or when the
   path is a symlink or another user's. Any failure exits non-zero with the first
   failure's exit code, and the message says what was cleared, what remains and how

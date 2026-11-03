@@ -123,7 +123,9 @@ cannot spend a code or lock the account. Still:
   `browser::sign_in`, including the step that parses, verifies and stores the
   session, so any failure after the window opens names the profile
   (`failed_sign_in`). Logout attempts every step, keychain first and profile last,
-  then names what was cleared and what remains (`incomplete_logout`). `auth status` cannot report it
+  then names what was cleared and what remains (`incomplete_logout`). The config is
+  read only in the arms that use it, so a broken file doesn't stop logout; `dispatch`
+  takes the logout as a seam so a test can run it with neither keychain nor profile. `auth status` cannot report it
   until `pk-cli-browser` can say whether it exists; don't recompute its path here.
 - `with_reauth` retries **once** and never loops. The recovery step is
   `client::refresh_or_relogin`: exchange the refresh token, and only if that is

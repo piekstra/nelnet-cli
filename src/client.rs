@@ -600,9 +600,29 @@ pub fn establish_session(
     if verify {
         let portal = Portal::with_session(cfg.base_url(), session.clone(), verbose)?;
         // A cheap, read-only endpoint that proves the token is accepted.
-        portal.get_text(paths::OVERVIEW)?;
+        let body = portal.get_text(paths::OVERVIEW)?;
+        verifying_read_holds_data(paths::OVERVIEW, &body)?;
     }
     session.store(creds)
+}
+
+/// A 2xx with nothing in it doesn't show the token was accepted: a stale session
+/// from a kept browser profile could get an empty body, `null` or `{}`. The
+/// overview is a JSON object, so anything but JSON with something in it is
+/// inconclusive, and a session that can't be told from a stale one isn't stored.
+fn verifying_read_holds_data(path: &str, body: &str) -> Result<(), CliError> {
+    let holds_data = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(fields)) => !fields.is_empty(),
+        Ok(serde_json::Value::Array(items)) => !items.is_empty(),
+        _ => false,
+    };
+    if holds_data {
+        return Ok(());
+    }
+    Err(CliError::Upstream(format!(
+        "the verifying read of {path} answered with no data, so this session can't be told from \
+         a stale one; nothing was stored"
+    )))
 }
 
 /// Whether a 403 body is Akamai's edge denial rather than the application
@@ -703,6 +723,27 @@ pub fn pdf_error(bytes: &[u8], what: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_verifying_read_with_no_data_is_inconclusive() {
+        for body in [
+            "",
+            " \n",
+            "null",
+            "{}",
+            "{ }",
+            "[]",
+            "true",
+            "<html></html>",
+        ] {
+            let e = verifying_read_holds_data("/dummy", body).unwrap_err();
+            assert_eq!(e.exit_code(), 5, "{body:?}");
+            let m = e.to_string();
+            assert!(m.contains("/dummy"), "{m}");
+            assert!(m.contains("nothing was stored"), "{m}");
+        }
+        verifying_read_holds_data("/dummy", r#"{"dummy":1}"#).unwrap();
+    }
 
     #[test]
     fn a_real_pdf_passes() {

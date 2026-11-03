@@ -165,24 +165,49 @@ fn main() {
 fn run(cli: &Cli) -> Result<(), CliError> {
     let store = ConfigStore::new(BIN);
     let creds = CredentialStore::for_binary(BIN);
-    let cfg: Config = store.load()?;
-    let ctx = Ctx {
-        common: &cli.common,
-        cfg: &cfg,
-        creds: &creds,
+    dispatch(cli, &store, &creds, &|store, forget| {
+        run_logout(
+            &cli.common,
+            store,
+            forget,
+            || creds.delete(SESSION_ACCOUNT),
+            || pk_cli_browser::forget_profile(BIN),
+        )
+    })
+}
+
+/// `auth logout`, passed in so a test can run the dispatch without the keychain
+/// or the real browser profile.
+type Logout<'a> = &'a dyn Fn(&ConfigStore, bool) -> Result<(), CliError>;
+
+/// The config is read only by the arms that use it, so a file that can't be
+/// parsed doesn't stop `auth logout`.
+fn dispatch(
+    cli: &Cli,
+    store: &ConfigStore,
+    creds: &CredentialStore,
+    logout: Logout<'_>,
+) -> Result<(), CliError> {
+    let with_ctx = |command: &dyn Fn(&Ctx) -> Result<(), CliError>| -> Result<(), CliError> {
+        let cfg: Config = store.load()?;
+        command(&Ctx {
+            common: &cli.common,
+            cfg: &cfg,
+            creds,
+        })
     };
 
     match &cli.command {
-        Command::Auth(cmd) => auth(cli, cmd, &store, &creds, &cfg),
-        Command::Config(cmd) => config(cli, cmd, &store),
-        Command::Summary => summary::run(&ctx),
-        Command::Loans(cmd) => loans::run(&ctx, cmd),
-        Command::Transactions(cmd) => transactions::run(&ctx, cmd),
-        Command::Repayment => repayment::run(&ctx),
-        Command::Autopay => autopay::run(&ctx),
-        Command::Tax => tax::run(&ctx),
-        Command::Documents(cmd) => documents::run(&ctx, cmd),
-        Command::Api(args) => api(&ctx, args),
+        Command::Auth(cmd) => auth(cli, cmd, store, creds, logout),
+        Command::Config(cmd) => config(cli, cmd, store),
+        Command::Summary => with_ctx(&|ctx| summary::run(ctx)),
+        Command::Loans(cmd) => with_ctx(&|ctx| loans::run(ctx, cmd)),
+        Command::Transactions(cmd) => with_ctx(&|ctx| transactions::run(ctx, cmd)),
+        Command::Repayment => with_ctx(&|ctx| repayment::run(ctx)),
+        Command::Autopay => with_ctx(&|ctx| autopay::run(ctx)),
+        Command::Tax => with_ctx(&|ctx| tax::run(ctx)),
+        Command::Documents(cmd) => with_ctx(&|ctx| documents::run(ctx, cmd)),
+        Command::Api(args) => with_ctx(&|ctx| api(ctx, args)),
         Command::SelfUpdate(args) => Updater {
             repo: REPO.into(),
             binary: BIN.into(),
@@ -255,12 +280,13 @@ fn auth(
     cmd: &AuthCmd,
     store: &ConfigStore,
     creds: &CredentialStore,
-    cfg: &Config,
+    logout: Logout<'_>,
 ) -> Result<(), CliError> {
     match cmd {
-        AuthCmd::Login(args) => login(cli, args, creds, cfg),
-        AuthCmd::Refresh(args) => refresh(cli, args, store, creds, cfg),
+        AuthCmd::Login(args) => login(cli, args, creds, &store.load()?),
+        AuthCmd::Refresh(args) => refresh(cli, args, store, creds, &store.load()?),
         AuthCmd::Status => {
+            let cfg: Config = store.load()?;
             let stored = creds.get(SESSION_ACCOUNT)?;
             let has_session = stored.is_some();
             let mut status = AuthStatus::new(true, has_session, AuthMethod::BrowserSession);
@@ -280,21 +306,9 @@ fn auth(
             status.emit(cli.common.json);
             Ok(())
         }
-        AuthCmd::Logout(args) => {
-            // Every step runs whatever the one before it did: the steps come
-            // first and the profile last, and `logout_browser` reports each.
-            let mut steps: Vec<LogoutStep> =
-                vec![("the session", creds.delete(SESSION_ACCOUNT).map(drop))];
-            if args.forget {
-                steps.push(("the saved settings", store.clear().map(drop)));
-            }
-            let line = logout_browser(steps, || pk_cli_browser::forget_profile(BIN))?;
-            if !cli.common.quiet {
-                eprintln!("{line}");
-            }
-            Ok(())
-        }
+        AuthCmd::Logout(args) => logout(store, args.forget),
         AuthCmd::SetCredential(args) => {
+            let cfg: Config = store.load()?;
             if creds.get(SESSION_ACCOUNT)?.is_some() && !args.overwrite {
                 return Err(CliError::Usage(
                     "a session is already stored; pass --overwrite to replace it".into(),
@@ -306,7 +320,7 @@ fn auth(
             // storing an unexercised token is how a keychain entry ends up
             // failing on the next unrelated command instead of here. The offline
             // path (headless, no network) is `auth login --stdin --no-verify`.
-            client::establish_session(cfg, creds, session, true, cli.common.verbose)?;
+            client::establish_session(&cfg, creds, session, true, cli.common.verbose)?;
             if !cli.common.quiet {
                 eprintln!(
                     "session verified and stored in the OS keychain ({})",
@@ -316,6 +330,28 @@ fn auth(
             Ok(())
         }
     }
+}
+
+/// `auth logout`, with the keychain and the real profile passed in. Every step
+/// runs whatever the one before it did: the steps come first and the profile last,
+/// and `logout_browser` reports each. Clearing the file needs no parse, so
+/// `--forget` also clears a config that can't be read.
+fn run_logout(
+    common: &CommonArgs,
+    store: &ConfigStore,
+    forget: bool,
+    delete_session: impl FnOnce() -> Result<bool, CliError>,
+    remove_profile: impl FnOnce() -> Result<bool, BrowserError>,
+) -> Result<(), CliError> {
+    let mut steps: Vec<LogoutStep> = vec![("the session", delete_session().map(drop))];
+    if forget {
+        steps.push(("the saved settings", store.clear().map(drop)));
+    }
+    let line = logout_browser(steps, remove_profile)?;
+    if !common.quiet {
+        eprintln!("{line}");
+    }
+    Ok(())
 }
 
 /// What a logout step clears, and how it went.
@@ -356,7 +392,7 @@ fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>
             Ok(()) => cleared.push(name),
             Err(e) => {
                 remains.push(name);
-                reasons.push(e.to_string());
+                reasons.push(format!("{name}: {}", bare_message(&e)));
                 forget_step_failed |= index > 0;
                 first.get_or_insert(e);
             }
@@ -375,7 +411,7 @@ fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>
                 _ => "Repair or delete that path, then run",
             };
             remains.push("the browser profile");
-            reasons.push(e.to_string());
+            reasons.push(format!("the browser profile: {e}"));
             first.get_or_insert(CliError::from(e));
             finish
         }
@@ -390,13 +426,37 @@ fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>
         many => format!("{} remain", and_list(many)),
     };
     let message = format!(
-        "logout incomplete: {cleared} and {remains}. {}. {finish} `{BIN} auth logout{}` again.",
-        reasons.join(". "),
+        "logout incomplete: {cleared} and {remains} ({}). {finish} `{BIN} auth logout{}` again.",
+        reasons.join("; "),
         if forget_step_failed { " --forget" } else { "" }
     );
     match first {
-        Some(error) => nlnt::browser::map_message(error, |_| message),
+        Some(first) => with_exit_code_of(first, message),
         None => CliError::Other(message),
+    }
+}
+
+/// A `CliError`'s message without the prefix its `Display` adds, so a report
+/// built from several doesn't repeat them.
+fn bare_message(error: &CliError) -> &str {
+    match error {
+        CliError::Usage(m)
+        | CliError::Auth(m)
+        | CliError::NotFound(m)
+        | CliError::Upstream(m)
+        | CliError::ConfirmationRequired(m)
+        | CliError::Keychain(m)
+        | CliError::Other(m) => m,
+    }
+}
+
+/// `message` with `first`'s exit code. `Keychain` and `Other` both exit 1 and only
+/// `Other` adds no prefix. `NotFound`, `Upstream` and `ConfirmationRequired` alone
+/// have their codes, so their `Display` prefix stays; no logout step returns them.
+fn with_exit_code_of(first: CliError, message: String) -> CliError {
+    match first {
+        CliError::Keychain(_) | CliError::Other(_) => CliError::Other(message),
+        other => nlnt::browser::map_message(other, |_| message),
     }
 }
 
@@ -752,9 +812,11 @@ mod tests {
         assert!(!profile.exists());
         assert_eq!(err.exit_code(), 1, "{err}");
         let m = err.to_string();
+        assert!(m.starts_with("logout incomplete: "), "{m}");
+        assert!(!m.contains("keychain error"), "{m}");
         assert!(m.contains("the browser profile is cleared"), "{m}");
         assert!(m.contains("only the session remains"), "{m}");
-        assert!(m.contains("denied"), "{m}");
+        assert!(m.contains("(the session: denied)"), "{m}");
         assert!(m.contains("`nlnt auth logout` again"), "{m}");
     }
 
@@ -765,10 +827,7 @@ mod tests {
         let mut attempted = false;
         let steps = vec![
             ("the session", Ok(())),
-            (
-                "the saved settings",
-                Err(CliError::Upstream("first".into())),
-            ),
+            ("the saved settings", Err(CliError::Auth("first".into()))),
         ];
         let err = logout_browser(steps, || {
             attempted = true;
@@ -776,8 +835,9 @@ mod tests {
         })
         .unwrap_err();
         assert!(attempted);
-        assert_eq!(err.exit_code(), 5, "{err}");
+        assert_eq!(err.exit_code(), 3, "{err}");
         let m = err.to_string();
+        assert!(m.starts_with("logout incomplete: "), "{m}");
         assert!(m.contains("the session is cleared"), "{m}");
         assert!(
             m.contains("the saved settings and the browser profile remain"),
@@ -787,6 +847,85 @@ mod tests {
             assert!(m.contains(reason), "{m}");
         }
         assert!(m.contains("`nlnt auth logout --forget` again"), "{m}");
+    }
+
+    /// No prefix leads the report or repeats inside it, whichever variants the
+    /// failures were.
+    #[test]
+    fn the_report_is_built_from_inner_messages() {
+        let steps = vec![
+            ("the session", Err(CliError::Keychain("denied".into()))),
+            (
+                "the saved settings",
+                Err(CliError::Other("read-only".into())),
+            ),
+        ];
+        let err = logout_browser(steps, || Ok(false)).unwrap_err();
+        assert_eq!(err.exit_code(), 1, "{err}");
+        let m = err.to_string();
+        assert!(
+            m.starts_with("logout incomplete: nothing is cleared"),
+            "{m}"
+        );
+        assert_eq!(m.matches("keychain error").count(), 0, "{m}");
+        assert!(
+            m.contains("(the session: denied; the saved settings: read-only)"),
+            "{m}"
+        );
+    }
+
+    /// A config that can't be parsed doesn't stop `auth logout`, which runs every
+    /// step, and `--forget` clears the broken file. Nothing here reaches the
+    /// keychain or the real profile: the seam stands in for both, and `auth status`
+    /// stops at the config it can't load.
+    #[test]
+    fn logout_runs_on_a_config_that_cannot_be_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let store = ConfigStore::new(BIN).with_override(Some(path.clone()));
+        let creds = CredentialStore::for_binary(BIN);
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["nlnt"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).unwrap()
+        };
+        let deleted = std::cell::Cell::new(0);
+        let removed = std::cell::Cell::new(0);
+        let common = parse(&["auth", "logout"]).common;
+        let seam = |store: &ConfigStore, forget: bool| {
+            run_logout(
+                &common,
+                store,
+                forget,
+                || {
+                    deleted.set(deleted.get() + 1);
+                    Ok(true)
+                },
+                || {
+                    removed.set(removed.get() + 1);
+                    Ok(false)
+                },
+            )
+        };
+
+        dispatch(&parse(&["auth", "logout"]), &store, &creds, &seam).unwrap();
+        assert_eq!((deleted.get(), removed.get()), (1, 1));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+
+        // The commands that read the config still say it's broken.
+        let unused = |_: &ConfigStore, _: bool| -> Result<(), CliError> { panic!("not a logout") };
+        assert!(dispatch(&parse(&["auth", "status"]), &store, &creds, &unused).is_err());
+
+        dispatch(
+            &parse(&["auth", "logout", "--forget"]),
+            &store,
+            &creds,
+            &seam,
+        )
+        .unwrap();
+        assert_eq!((deleted.get(), removed.get()), (2, 2));
+        assert!(!path.exists());
     }
 
     /// A captured value the parser refuses is the portal's shape changing
