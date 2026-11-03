@@ -4,7 +4,7 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use pk_cli_auth::{AuthMethod, AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
-use pk_cli_browser::BrowserArgs;
+use pk_cli_browser::{BrowserArgs, BrowserError};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{output, CliError, CommonArgs};
@@ -70,13 +70,16 @@ enum AuthCmd {
     ///
     /// Nelnet's login is an OAuth2/OIDC flow behind Akamai bot protection, so
     /// the CLI does not replay a password. With `--browser` (the primary path) a
-    /// Chrome window with a throwaway profile opens at
-    /// https://nelnet.studentaid.gov. Sign in there: the username, password and
-    /// one-time code go to Nelnet's own pages, never through this CLI. Once the
-    /// portal has stored its session, `nlnt` reads it from the page, closes the
-    /// window and deletes the profile:
+    /// Chrome window opens at https://nelnet.studentaid.gov. Sign in there: the
+    /// username, password and one-time code go to Nelnet's own pages, never
+    /// through this CLI. Once the portal has stored its session, `nlnt` takes it
+    /// from the page and closes the window:
     ///
     ///   nlnt auth login --browser
+    ///
+    /// The window's Chrome profile stays on disk for the next sign-in, so Nelnet
+    /// can remember the device; `--fresh-profile` signs in through a scratch one
+    /// instead, and `auth logout` removes the kept one.
     ///
     /// Chrome is found at the standard install paths; `NLNT_CHROME` points at
     /// another binary.
@@ -105,7 +108,8 @@ enum AuthCmd {
     Refresh(RefreshArgs),
     /// Report credential and session state (auth-status/v1).
     Status,
-    /// Clear the cached session; --forget also clears saved settings.
+    /// Clear the cached session and remove the kept browser profile; --forget
+    /// also clears saved settings.
     Logout(LogoutArgs),
     /// Write a session bundle to the keychain (rotation / scripted setup).
     ///
@@ -278,8 +282,10 @@ fn auth(
             if args.forget {
                 store.clear()?;
             }
+            // Last, so a refusal (its window still open) leaves the rest done.
+            let line = logout_browser(|| pk_cli_browser::forget_profile(BIN))?;
             if !cli.common.quiet {
-                eprintln!("logged out");
+                eprintln!("{line}");
             }
             Ok(())
         }
@@ -305,6 +311,24 @@ fn auth(
             Ok(())
         }
     }
+}
+
+/// `auth logout`'s browser step. The profile `auth login --browser` keeps holds
+/// the identity host's cookies (its remembered device and session), so a logout
+/// removes it too and the next sign-in starts signed out. The removal is passed
+/// in: the binary binds it to `forget_profile(BIN)`, the tests to
+/// `forget_profile_in` under a temp dir, so a test never removes the owner's
+/// real profile. Returns the status line.
+fn logout_browser(forget: impl FnOnce() -> Result<bool, BrowserError>) -> Result<String, CliError> {
+    let removed = forget()?;
+    Ok(format!(
+        "logged out{}",
+        if removed {
+            "; browser profile removed"
+        } else {
+            ""
+        }
+    ))
 }
 
 /// Refuse a flag combination `--browser` cannot honor. Runs before anything
@@ -351,9 +375,10 @@ fn login(
         ));
     }
     let browser = args.browser.browser;
-    let retry = retry_command(browser, login.overwrite);
+    let fresh_profile = args.browser.fresh_profile;
+    let retry = retry_command(browser, fresh_profile, login.overwrite);
     let raw = if browser {
-        nlnt::browser::capture_session(cli.common.quiet, &retry)?
+        nlnt::browser::capture_session(cli.common.quiet, fresh_profile, &retry)?
     } else {
         let prompt = if login.non_interactive {
             None
@@ -389,12 +414,18 @@ fn login(
     Ok(())
 }
 
-/// The command a failed login tells the owner to re-run: the same path, and
-/// `--overwrite` again when it replaced a stored session.
-fn retry_command(browser: bool, overwrite: bool) -> String {
+/// The command a failed login tells the owner to re-run: the same path in the
+/// same kind of profile, and `--overwrite` again when it replaced a stored
+/// session.
+fn retry_command(browser: bool, fresh_profile: bool, overwrite: bool) -> String {
     format!(
-        "{BIN} auth login{}{}",
+        "{BIN} auth login{}{}{}",
         if browser { " --browser" } else { "" },
+        if fresh_profile {
+            " --fresh-profile"
+        } else {
+            ""
+        },
         if overwrite { " --overwrite" } else { "" }
     )
 }
@@ -507,13 +538,59 @@ mod tests {
     #[test]
     fn the_retry_command_repeats_the_path_and_overwrite() {
         let cases = [
-            (false, false, "nlnt auth login"),
-            (false, true, "nlnt auth login --overwrite"),
-            (true, false, "nlnt auth login --browser"),
-            (true, true, "nlnt auth login --browser --overwrite"),
+            (false, false, false, "nlnt auth login"),
+            (false, false, true, "nlnt auth login --overwrite"),
+            (true, false, false, "nlnt auth login --browser"),
+            (true, false, true, "nlnt auth login --browser --overwrite"),
+            (
+                true,
+                true,
+                false,
+                "nlnt auth login --browser --fresh-profile",
+            ),
+            (
+                true,
+                true,
+                true,
+                "nlnt auth login --browser --fresh-profile --overwrite",
+            ),
         ];
-        for (browser, overwrite, want) in cases {
-            assert_eq!(retry_command(browser, overwrite), want);
+        for (browser, fresh_profile, overwrite, want) in cases {
+            assert_eq!(retry_command(browser, fresh_profile, overwrite), want);
+        }
+    }
+
+    /// The logout's browser step on a temp dir through `test-util`'s
+    /// `forget_profile_in`, so the test never reaches the owner's real profile.
+    #[test]
+    fn logout_removes_the_kept_browser_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("piekstra.nlnt").join("browser-profile");
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        let forget = || pk_cli_browser::forget_profile_in(root.path(), BIN);
+        assert_eq!(
+            logout_browser(forget).unwrap(),
+            "logged out; browser profile removed"
+        );
+        assert!(!profile.exists());
+        // No profile left: nothing to remove, and not an error.
+        assert_eq!(logout_browser(forget).unwrap(), "logged out");
+    }
+
+    /// A profile in use or needing repair is refused with the crate's own
+    /// message (what to close, or what to fix) and exit 1, never reported as
+    /// logged out.
+    #[test]
+    fn a_refused_profile_removal_is_an_error_not_a_logout() {
+        let refusals = [
+            BrowserError::ProfileInUse("a Chrome (pid 7) is still running in x".into()),
+            BrowserError::Profile("the browser profile dir x is a symlink".into()),
+        ];
+        for refusal in refusals {
+            let shown = refusal.to_string();
+            let err = logout_browser(|| Err(refusal)).unwrap_err();
+            assert_eq!(err.exit_code(), 1, "{err}");
+            assert!(err.to_string().contains(&shown), "{err}");
         }
     }
 

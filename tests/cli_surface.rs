@@ -267,6 +267,21 @@ fn login_help_leads_with_the_browser() {
     let short = nlnt().args(["auth", "login", "-h"]).assert().success();
     let short = String::from_utf8_lossy(&short.get_output().stdout).to_string();
     assert!(short.contains("--browser"), "{short}");
+    assert!(short.contains("--fresh-profile"), "{short}");
+}
+
+/// `--fresh-profile` chooses the browser's profile, so it means nothing without
+/// `--browser`: a usage error before the keychain is read or a window opens.
+#[test]
+fn fresh_profile_requires_the_browser() {
+    let out = nlnt_without_chrome()
+        .args(["auth", "login", "--fresh-profile"])
+        .write_stdin("")
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(stderr.contains("--browser"), "{stderr}");
+    assert!(!stderr.contains("NLNT_CHROME"), "{stderr}");
 }
 
 /// `--browser` takes the session from the window, always verifies it and

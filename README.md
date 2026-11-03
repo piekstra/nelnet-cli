@@ -55,11 +55,23 @@ nlnt documents list                 # statements (real PDFs)
 nlnt documents download <id> -o ~/Documents/statement.pdf
 ```
 
-`auth login --browser` opens Chrome with a throwaway profile at
-`https://nelnet.studentaid.gov`. Sign in there — username, password and the
-one-time code go to Nelnet, never through `nlnt`. Once the portal has stored its
-session, `nlnt` reads it, closes the window and deletes the profile. Chrome is
-found at the standard install paths; set `NLNT_CHROME` to use another binary.
+`auth login --browser` opens Chrome at `https://nelnet.studentaid.gov`. Sign in
+there — username, password and the one-time code go to Nelnet, never through
+`nlnt`. Once the portal has stored its session, `nlnt` takes it out of the page
+and closes the window. Chrome is found at the standard install paths; set
+`NLNT_CHROME` to use another binary.
+
+The window runs in a Chrome profile `nlnt` **keeps on disk** between sign-ins
+(owner-only, `~/Library/Application Support/piekstra.nlnt/browser-profile` on
+macOS, `$XDG_DATA_HOME/piekstra.nlnt/browser-profile` or
+`~/.local/share/piekstra.nlnt/browser-profile` on Linux), so Nelnet's cookies
+carry over and a later sign-in may need less input: no one-time code on a device
+Nelnet remembers. It keeps the cookies, not the tokens: `nlnt` removes the
+session from the page as it reads it. The trade is a profile holding Nelnet's
+cookies on your disk. `nlnt auth logout` removes it; it refuses while a sign-in or
+a Chrome window is using the profile, so close the window and log out again.
+`nlnt auth login --browser --fresh-profile` signs in once through a scratch
+profile, deleted afterwards, and leaves the kept one alone.
 
 The session carries a refresh token, so this is a **one-time sign-in**: `nlnt`
 renews the short-lived access token itself (`nlnt auth refresh`, or
@@ -90,8 +102,8 @@ security add-generic-password -U -s piekstra.nlnt -a password
 nlnt auth refresh --command "node $(pwd)/scripts/nlnt-capture.mjs" --save
 ```
 
-The reference script (`scripts/nlnt-capture.mjs`) drives real Chrome with a
-persistent profile: it silently renews with no MFA **while the identity session
+The reference script (`scripts/nlnt-capture.mjs`) drives real Chrome with its own
+persistent profile (`auth logout` does not touch that one): it silently renews with no MFA **while the identity session
 lives (observed ~1 hour)**, and after that does a full username/password login —
 needing an MFA code unless the device is trusted. If it can't get a fresh
 session it **errors clearly rather than storing a dead token**. So "unattended"

@@ -81,29 +81,43 @@ holds the capture:
 
 | | |
 | --- | --- |
-| Launch URL | `https://nelnet.studentaid.gov`, in a Chrome started with a throwaway `0700` profile, a DevTools port Chrome picks itself, and no automation flags |
+| Launch URL | `https://nelnet.studentaid.gov`, in a Chrome started with the owner-only (`0700`) profile the CLI keeps (`--fresh-profile`: a throwaway one), a DevTools port Chrome picks itself, and no automation flags |
 | Sign-in | by the owner, on Nelnet's own pages: the SPA sends them to `auth.nelnet.studentaid.gov` for username, password and the one-time code |
 | Read from | pages on exactly `nelnet.studentaid.gov` (`HostRule::exact`): an `https` page on the default port, matched label for label, whose document's own `location.hostname` matches too |
 | Never touched | `auth.nelnet.studentaid.gov` (Akamai, the bot checks): the CLI evaluates nothing there and navigates nothing there; the owner's own sign-in passes through it in the window. `mmaapi` is reached only by the verifying read afterwards, over the CLI's HTTP client |
 | What is read | `localStorage['oidc.user:https://auth.nelnet.studentaid.gov:mma']`, the value the DevTools fallback copies. No cookies |
-| Ready when | the value contains `access_token`; before that the expression answers `null` |
-| Then | the tab is closed the moment the value is read, Chrome is stopped, and the profile is deleted |
+| Ready when | the value contains `access_token` and its `expires_at` has not passed; before that the expression answers `null` |
+| Then | the value is removed from `localStorage` as it is read, the tab is closed at once and Chrome is stopped. The profile stays on disk |
 
 The expression (`browser::expression`, pinned by a unit test):
 
 ```js
-(() => { const v = localStorage.getItem("oidc.user:https://auth.nelnet.studentaid.gov:mma"); return v && v.includes('access_token') ? v : null; })()
+(() => { const v = localStorage.getItem("oidc.user:https://auth.nelnet.studentaid.gov:mma"); if (!v || !v.includes('access_token')) return null; localStorage.removeItem("oidc.user:https://auth.nelnet.studentaid.gov:mma"); let exp; try { exp = JSON.parse(v).expires_at; } catch {} return typeof exp === 'number' && exp * 1000 <= Date.now() ? null : v; })()
 ```
 
 What follows from it:
 
 - **The CLI is the sole holder from the start.** The tab closes before the SPA
-  can renew the token it just stored, and the profile (with its `idsrv` cookie)
-  is deleted, so no browser keeps a live copy of the refresh-token family. The
-  single-holder rule in § Token lifetimes holds without the owner doing
-  anything; on the DevTools path it is theirs to keep (close the tab).
-- **Every browser login asks for the one-time code.** The throwaway profile
-  keeps no "remember this device" cookie from one run to the next.
+  can renew the token it just stored, and the read takes the bundle out of
+  `localStorage`, so the kept profile keeps no copy of the refresh-token family
+  for a later window to hand over or for the SPA to present. The single-holder
+  rule in § Token lifetimes holds without the owner doing anything; on the
+  DevTools path it is theirs to keep (close the tab). The removal reaching disk
+  before Chrome stops is **UNVERIFIED-LIVE**, so a bundle a later window finds
+  past its `expires_at` is removed and not read; one still inside its 15
+  minutes would be read, and could hold a token the CLI has since rotated.
+- **A later sign-in can need less input (UNVERIFIED-LIVE).** The kept profile
+  (`<data dir>/piekstra.nlnt/browser-profile`) keeps the identity host's cookies
+  but no bundle. While `idsrv` lasts (~1 hour, § Token lifetimes) the SPA should
+  get a new bundle with no password or code; after that, a device Nelnet
+  remembers (`SaveTrustedDevice`) should skip only the code. Each sign-in mints
+  a new token family. `--fresh-profile` signs in through a scratch profile,
+  removed when the window closes, so that sign-in is an unknown device and asks
+  for the code.
+- `auth logout` removes the kept profile as its last step. A sign-in or a Chrome
+  using it refuses with exit 1, the keychain session already cleared; close the
+  window and log out again. The capture script's profile below is a separate
+  one, which logout does not touch.
 - A captured value the parser refuses is exit 5: the portal changed what it
   stores, which is not a usage mistake. A verifying read the portal refuses is
   exit 3, with nothing stored.
@@ -112,8 +126,8 @@ What follows from it:
   `scripts/nlnt-capture.mjs` reads. With no Chrome, the error points at the
   fallback below.
 - The wait is 10 minutes. A timeout or a closed window is exit 3, Ctrl-C
-  cancels (the window and profile are cleaned up), and `-q` silences the status
-  lines. `--browser` refuses `--stdin`, `--from-env`, `--no-verify` and
+  cancels (Chrome is stopped, a `--fresh-profile` scratch profile removed), and
+  `-q` silences the status lines. `--fresh-profile` without `--browser` is exit 2. `--browser` refuses `--stdin`, `--from-env`, `--no-verify` and
   `--non-interactive` with exit 2, before the keychain is read or a window
   opens.
 

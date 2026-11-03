@@ -1,14 +1,23 @@
 //! `auth login --browser`: the portal session read out of a sign-in window
 //! (`pk-cli-browser`, cli-common DESIGN.md §2.2).
 //!
-//! The owner signs in at the SPA in a scratch-profile Chrome. The password and
-//! the one-time code go to Nelnet's own pages, the Akamai-protected identity
-//! host included; this module never reads from or navigates to that host. Once
-//! the SPA has stored its token bundle, the capture reads it from the SPA
-//! host's `localStorage` (the value the DevTools fallback copies by hand) and
-//! closes the tab before the SPA can renew, and so rotate, the refresh token
-//! it just handed over. The value then takes the same path as a `--stdin`
-//! import: `Session::parse_captured`, one verifying read, the keychain.
+//! The owner signs in at the SPA in a Chrome running in the profile the crate
+//! keeps for this CLI, so the identity host's cookies (its remembered device,
+//! its session) carry over to the next sign-in. The password and the one-time
+//! code go to Nelnet's own pages, the Akamai-protected identity host included;
+//! this module never reads from or navigates to that host. Once the SPA has
+//! stored its token bundle, the capture reads it from the SPA host's
+//! `localStorage` (the value the DevTools fallback copies by hand) and closes
+//! the tab before the SPA can renew, and so rotate, the refresh token it just
+//! handed over. The value then takes the same path as a `--stdin` import:
+//! `Session::parse_captured`, one verifying read, the keychain.
+//!
+//! The read also **removes the bundle from `localStorage`**, because the
+//! profile outlives the window. Refresh tokens rotate with reuse detection
+//! (`docs/api.md` § Token lifetimes): a copy left in the profile goes stale at
+//! the CLI's next refresh, and the next window would hand it over, or the SPA
+//! would present it and revoke the CLI's whole token family. So the profile
+//! keeps the cookies and never the tokens.
 
 use pk_cli_browser::{BrowserError, Capture, HostRule, Launch, DEFAULT_TIMEOUT};
 use pk_cli_core::CliError;
@@ -32,11 +41,21 @@ pub const SESSION_STORAGE_KEY: &str = "oidc.user:https://auth.nelnet.studentaid.
 /// `null` before. Signed out, the key is absent, so the token is the
 /// readiness signal (the tab is closed the moment a value is read, so a
 /// premature read could not be retried).
+///
+/// It takes the bundle out of `localStorage` as it reads it, so the kept
+/// profile holds no copy of the token family (the module docs say why). A
+/// bundle already past its `expires_at` is one an earlier sign-in left, so it
+/// is removed and not handed over, and the wait goes on for a new one. A value
+/// that is not JSON is handed over for `Session::parse_captured` to refuse by
+/// name.
 pub fn expression() -> String {
     let key = serde_json::to_string(SESSION_STORAGE_KEY).expect("a str serializes");
     format!(
         "(() => {{ const v = localStorage.getItem({key}); \
-         return v && v.includes('access_token') ? v : null; }})()"
+         if (!v || !v.includes('access_token')) return null; \
+         localStorage.removeItem({key}); \
+         let exp; try {{ exp = JSON.parse(v).expires_at; }} catch {{}} \
+         return typeof exp === 'number' && exp * 1000 <= Date.now() ? null : v; }})()"
     )
 }
 
@@ -48,12 +67,18 @@ pub fn session_capture() -> Result<Capture, CliError> {
 }
 
 /// Open the sign-in window at [`START_URL`], wait for the owner to sign in,
-/// and return the captured bundle, unparsed. `login_hint` is the command the
+/// and return the captured bundle, unparsed. `fresh_profile` signs in through
+/// a scratch profile rather than the kept one; `login_hint` is the command the
 /// timeout and closed-window errors tell the owner to re-run.
-pub fn capture_session(quiet: bool, login_hint: &str) -> Result<Secret, CliError> {
+pub fn capture_session(
+    quiet: bool,
+    fresh_profile: bool,
+    login_hint: &str,
+) -> Result<Secret, CliError> {
     let captured = pk_cli_browser::capture(
         Launch::new(BIN)
             .url(START_URL)
+            .fresh_profile(fresh_profile)
             .quiet(quiet)
             .login_hint(login_hint),
         &session_capture()?,
@@ -114,12 +139,16 @@ mod tests {
     }
 
     #[test]
-    fn the_expression_reads_the_key_and_waits_for_a_token() {
+    fn the_expression_takes_the_key_and_waits_for_a_live_token() {
         assert_eq!(
             expression(),
             "(() => { const v = localStorage.getItem(\
              \"oidc.user:https://auth.nelnet.studentaid.gov:mma\"); \
-             return v && v.includes('access_token') ? v : null; })()"
+             if (!v || !v.includes('access_token')) return null; \
+             localStorage.removeItem(\
+             \"oidc.user:https://auth.nelnet.studentaid.gov:mma\"); \
+             let exp; try { exp = JSON.parse(v).expires_at; } catch {} \
+             return typeof exp === 'number' && exp * 1000 <= Date.now() ? null : v; })()"
         );
     }
 

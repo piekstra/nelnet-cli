@@ -18,13 +18,32 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   `--from-env <VAR>`. A password on a command line lands in shell history and in
   every `ps` listing on the machine.
 - **The browser sign-in window is short-lived and private.** `auth login
-  --browser` runs Chrome on a throwaway profile created `0700` under an
-  unpredictable name, reads the session over the DevTools protocol from
-  `nelnet.studentaid.gov` pages only, closes the tab the moment it has the
-  session, then stops Chrome and deletes the profile on every exit, Ctrl-C
+  --browser` runs Chrome on an owner-only (`0700`) profile, reads the session
+  over the DevTools protocol from `nelnet.studentaid.gov` pages only, closes the
+  tab the moment it has the session, then stops Chrome on every exit, Ctrl-C
   included. The DevTools port has no authentication, so while the window is
   open any local process that can reach it can read the window's session; the
   window stays open only for the sign-in.
+- **The browser profile is kept on disk between sign-ins.** It lives at
+  `~/Library/Application Support/piekstra.nlnt/browser-profile` on macOS and
+  under `$XDG_DATA_HOME` or `~/.local/share` on Linux, and a launch is refused
+  when it is a symlink, another user's or not `0700`. It holds the identity
+  host's cookies (`idsrv`, the remembered device), which is the trade for fewer
+  sign-ins. Chrome encrypts its cookies at rest (on macOS with the "Chrome Safe
+  Storage" key in the login keychain). `localStorage` is protected only by the
+  directory's mode, so the capture removes the token bundle from it as it reads
+  it: the profile is not meant to hold a refresh token after a sign-in. A window
+  killed before Chrome writes that removal can leave one, and `auth logout`
+  removes it with the profile. While `idsrv` lasts (observed ~1 hour), anyone
+  who can run a browser in this profile can mint a new session.
+- **`auth logout` removes the kept profile**, that directory and nothing else, as
+  its last step. It refuses (exit 1, with the keychain session already cleared)
+  while a sign-in or a Chrome is using the profile, or when the path is a symlink
+  or another user's. `auth login --browser --fresh-profile` runs one sign-in in a
+  scratch profile instead (`0700`, created exclusively under an unpredictable
+  name in the temp dir, removed when the window closes), leaving the kept one
+  alone. `scripts/nlnt-capture.mjs` keeps its own separate profile
+  (`NLNT_CAPTURE_PROFILE`), which `auth logout` does not touch.
 - **Secrets live only in the macOS keychain**, service `piekstra.nlnt`. Never a
   dotfile, never the config file (`~/.config/nlnt/config.json`), never an
   environment variable written to disk.

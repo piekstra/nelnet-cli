@@ -12,8 +12,8 @@ there before changing the command surface**; do not reconstruct the spec from
 this repo's code, it drifts.
 
 Every `pk-cli-*` crate is pinned to the same `cli-common` revision (see
-`Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`
-(cli-common v0.9.0 and later), which needs Rust 1.85.
+`Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`,
+whose kept profile needs cli-common v0.16.0 or later, and which needs Rust 1.85.
 
 ## The single most important fact
 
@@ -51,7 +51,7 @@ make install  # install to ~/.cargo/bin, dev-signed
 | `src/main.rs` | clap tree, `auth`/`config` commands, exit-code mapping |
 | `src/lib.rs` | module wiring, `BIN`/`REPO` constants |
 | `src/client.rs` | Bearer HTTP session, sentinel headers, token refresh, the auth/bot guards, `%PDF` check, **the endpoint map** |
-| `src/browser.rs` | the `auth login --browser` capture: start URL, the one host it reads, the `localStorage` expression |
+| `src/browser.rs` | the `auth login --browser` capture: start URL, the one host it reads, the `localStorage` expression, the profile choice |
 | `src/parse.rs` | responses → DTOs; all provider field knowledge |
 | `src/model.rs` | `LoanSummary`, `Loan`, `Transaction`, `TaxInfo` DTOs |
 | `src/config.rs` | non-secret settings, keychain account names |
@@ -110,6 +110,14 @@ cannot spend a code or lock the account. Still:
   it is the Akamai-protected identity host, and the owner's own clicks are the
   only traffic it should see from the window. `docs/api.md` § How the CLI gets
   the initial bundle records the capture.
+- **The browser profile is kept on disk** (`--fresh-profile` skips it for one
+  sign-in), so **the capture must take the bundle out of `localStorage` as it
+  reads it**. A bundle left in the profile goes stale at the CLI's next refresh,
+  and handing it over or letting the SPA present it breaks the single-holder rule
+  below. `auth logout` removes the profile last, through `logout_browser`'s
+  closure: the binary binds `pk_cli_browser::forget_profile`, tests bind
+  `forget_profile_in` under a temp dir. **No test may reach the owner's real
+  profile.**
 - `with_reauth` retries **once** and never loops. The recovery step is
   `client::refresh_or_relogin`: exchange the refresh token, and only if that is
   dead run the configured `refresh_command` (the reference capture script in
