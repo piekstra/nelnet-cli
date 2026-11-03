@@ -58,7 +58,9 @@ nlnt documents download <id> -o ~/Documents/statement.pdf
 `auth login --browser` opens Chrome at `https://nelnet.studentaid.gov`. Sign in
 there — username, password and the one-time code go to Nelnet, never through
 `nlnt`. Once the portal has stored its session, `nlnt` reads it from the page and
-closes the window. Chrome is found at the standard install paths; set
+closes the window. If the read that checks it can't tell, for example during an
+outage, the session is kept with a warning that it is unverified, so the sign-in
+isn't wasted. A session the portal refuses is not stored. Chrome is found at the standard install paths; set
 `NLNT_CHROME` to use another binary.
 
 The window runs in a Chrome profile `nlnt` **keeps on disk** between sign-ins
@@ -94,8 +96,8 @@ automatically on expiry). Sign in again only when the refresh token's own
 lifetime lapses (`nlnt auth login --browser --overwrite`).
 
 **Without Chrome**, sign in at `https://nelnet.studentaid.gov` in any browser,
-copy the session out of DevTools → Console, and pipe it in. It is parsed,
-verified and stored exactly as the browser path does:
+copy the session out of DevTools → Console, and pipe it in. It is parsed and
+verified as the browser path does, and stored only if the read proves it:
 
 ```sh
 # in the browser console:

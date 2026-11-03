@@ -31,7 +31,9 @@ Consequences for you:
   --browser` reads the bundle out of a Chrome window the owner signs in
   through; `auth login --stdin` / `--from-env` take the same value copied out of
   DevTools. Both go through `Session::parse_captured`, one verifying read and
-  the keychain. There is no password and no MFA in the CLI.
+  the keychain. A read that can't tell stores a session from the window, with a
+  warning (`keep_finished_sign_in`), because it can't be read again, and stores
+  nothing from a pipe. There is no password and no MFA in the CLI.
 - The fixtures are **scrubbed real captures**: preserve structure exactly and
   replace only values (see `tests/fixtures/README.md`). A rename in a real
   response must fail `fixture_shapes.rs`, not silently empty a column.

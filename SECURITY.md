@@ -58,6 +58,13 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   bundle can then stay on disk until the next launch's removal or `auth logout`.
   While `idsrv` lasts (observed ~1
   hour), anyone who can run a browser in this profile can mint a new session.
+- **A finished sign-in can be stored unverified.** The read that checks it runs after
+  the window, when the page's copy is gone, so a read that can't tell (a `429`, a
+  `5xx`, a dropped connection, a body with no data, an edge block) stores the session
+  anyway, with a warning even under `-q`. It can only be this sign-in's, because site
+  storage is cleared before Chrome starts, and it can't replace a stored session
+  without `--overwrite`, which login checks before the window opens. A `401` or the
+  API's own `403` stores nothing.
 - **The profile outlives a failed sign-in.** Any failure once the window has
   opened (a timeout, a closed window, Ctrl-C, a refused verifying read, a bundle
   the parser refuses, a failed keychain write) leaves the profile with what the

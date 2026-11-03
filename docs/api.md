@@ -131,8 +131,9 @@ What follows from it:
   (`browser_profile`), not whether it is signed in. A profile needing repair leaves
   the field out, with a warning naming the path and the fix, unless `-q`.
 - The verifying read must return data. An empty body, `null`, `{}` or anything else
-  that isn't JSON with something in it is exit 5 with nothing stored, since a stale
-  session could get one.
+  that isn't JSON with something in it doesn't prove the session, since a stale one
+  could get it. It is exit 5 with nothing stored on a piped route, and a warning on
+  a sign-in from the window (below).
 - If a renewal in another process outlasts the lock's wait, `auth logout` exits 5
   saying the session is deleted but may be stored again, and to wait a minute and
   rerun.
@@ -143,10 +144,23 @@ What follows from it:
   remains and how to finish. The capture script's profile below is a
   separate one, which logout does not touch.
 - A captured value the parser refuses is exit 5: the portal changed what it
-  stores, which is not a usage mistake. A verifying read the portal refuses is
-  exit 3, with nothing stored. A `429` or `5xx` on that read is exit 5, also with
-  nothing stored and no second read; the window is closed and its site storage
-  cleared, so a retry takes a new window.
+  stores, which is not a usage mistake.
+- **A finished sign-in is kept unless the portal refuses it.** The verifying read
+  runs after the window: Chrome has stopped and its site storage is cleared, so not
+  storing the session would cost another sign-in.
+  - A `401`, or a `403` that isn't an HTML page or the Akamai denial, is the portal
+    refusing the session: exit 3, nothing stored, and the error keeps what it
+    answered.
+  - Anything else says nothing about the session: a `429`, a `5xx`, a `404`, a dropped
+    connection, a 2xx with no data or a body that isn't JSON, or an edge block (the
+    Akamai denial, or any `403` with an HTML page). The session is stored, exit 0,
+    with a warning on stderr, even under `-q`, that it is unverified and that the next
+    read tests it. `auth status` makes no request, so it doesn't.
+  - Storing it is safe. Site storage is cleared before Chrome starts, so the session
+    can only be this sign-in's. A session already stored can't be replaced by accident:
+    login refuses before the window opens without `--overwrite`.
+  - `auth login --stdin`, `--from-env` and `auth set-credential` don't do this. The
+    value can be supplied again, so anything but a proven read stores nothing.
 - Chrome is found at the standard install paths (Chrome, Chromium, Edge on
   macOS and Linux), or `NLNT_CHROME` names the binary, the same variable
   `scripts/nlnt-capture.mjs` reads. With no Chrome, the error points at the
@@ -311,7 +325,9 @@ code:
 
 - A **403 whose body is the Akamai denial** (`Access denied`, `Reference #`) is
   reported as **upstream (exit 5)**, never as an auth failure — it happens before
-  the token is considered, so "re-authenticate" would be wrong advice.
+  the token is considered, so "re-authenticate" would be wrong advice. So is any
+  other 403 with an HTML page, whichever vendor's wording it uses, since the API
+  answers JSON.
 - Do **not** try to defeat this with a real browser at runtime; the header set is
   the sanctioned, tested path.
 
@@ -384,7 +400,7 @@ strings are space-padded (`"DIRECT SUB     "`) and must be trimmed.
 
 ### A 200 is not always success; a 403 is not always auth
 
-The auth guard maps: Akamai-denial 403 → upstream (5); other 401/403 → auth (3),
+The auth guard maps: Akamai-denial or HTML 403 → upstream (5); other 401/403 → auth (3),
 which triggers one refresh-and-retry; HTML where JSON was promised → upstream.
 
 ### The statement download needs `%PDF-`
