@@ -343,6 +343,7 @@ fn auth(
                     creds.service()
                 );
             }
+            emit_login_result(cli, true);
             Ok(())
         }
     }
@@ -624,7 +625,24 @@ fn login(
             creds.service()
         );
     }
+    emit_login_result(cli, verify && unverified.is_none());
     Ok(())
+}
+
+/// What `--json` prints once a session is stored. Nothing on stdout without it,
+/// where the text is on stderr.
+fn emit_login_result(cli: &Cli, verified: bool) {
+    output::emit(
+        cli.common.json,
+        "auth-login",
+        login_result(verified),
+        |_| {},
+    );
+}
+
+/// `verified` says whether a read accepted the session.
+fn login_result(verified: bool) -> serde_json::Value {
+    serde_json::json!({ "stored": true, "verified": verified })
 }
 
 /// `auth status` makes no request, so it isn't what tests the session. A later
@@ -1183,6 +1201,18 @@ mod tests {
         let m = e.to_string();
         assert!(m.contains("HTTP 403 with an HTML page"), "{m}");
         assert!(!m.contains("refused the session"), "{m}");
+    }
+
+    #[test]
+    fn the_login_result_always_says_whether_a_read_accepted_the_session() {
+        assert_eq!(
+            output::tagged("auth-login", login_result(true)),
+            serde_json::json!({ "schema": "auth-login/v1", "stored": true, "verified": true })
+        );
+        assert_eq!(
+            output::tagged("auth-login", login_result(false)),
+            serde_json::json!({ "schema": "auth-login/v1", "stored": true, "verified": false })
+        );
     }
 
     /// `auth status` makes no request, so the warning must not send anyone to it.

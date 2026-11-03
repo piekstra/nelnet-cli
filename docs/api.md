@@ -155,7 +155,10 @@ What follows from it:
     connection, a 2xx with no data or a body that isn't JSON, or an edge block (the
     Akamai denial, or any `403` with an HTML page). The session is stored, exit 0,
     with a warning on stderr, even under `-q`, that it is unverified and that if reads
-    keep failing, the way out is `nlnt auth login --browser --overwrite`.
+    keep failing, the way out is `nlnt auth login --browser --overwrite`. `--json`
+    prints `{"schema":"auth-login/v1","stored":true,"verified":false}`. `verified` is
+    always there, and is `true` when a read accepted the session. `auth login` and
+    `auth set-credential` print the same result, and `set-credential` always verifies.
   - A later read settles a `429`, a `5xx` or a dropped connection once the outage
     ends. It can't settle an answer that repeats: an HTML `403` and a 2xx with no data
     can come back for this session on every read, as can a `404` or the Akamai

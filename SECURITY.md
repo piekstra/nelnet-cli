@@ -61,7 +61,8 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
 - **A finished sign-in can be stored unverified.** The read that checks it runs after
   the window, when the page's copy is gone, so a read that can't tell (a `429`, a
   `5xx`, a dropped connection, a body with no data, an edge block) stores the session
-  anyway, with a warning even under `-q`. It can only be this sign-in's, because site
+  anyway, with a warning even under `-q` and `verified: false` in the `--json` result.
+  It can only be this sign-in's, because site
   storage is cleared before Chrome starts, and it can't replace a stored session
   without `--overwrite`, which login checks before the window opens. With `--overwrite`
   it does replace it. A `401` or the API's own `403` stores nothing. A later read
