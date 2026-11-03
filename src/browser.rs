@@ -12,20 +12,24 @@
 //! handed over. The value then takes the same path as a `--stdin` import:
 //! `Session::parse_captured`, one verifying read, the keychain.
 //!
-//! The read also **removes the bundle from `localStorage`**, because the
-//! profile outlives the window. Refresh tokens rotate with reuse detection
-//! (`docs/api.md` § Token lifetimes): a copy left in the profile goes stale at
-//! the CLI's next refresh, and the next window would hand it over, or the SPA
-//! would present it and revoke the CLI's whole token family.
+//! The read writes nothing. The profile outlives the window, and refresh tokens
+//! rotate with reuse detection (`docs/api.md` § Token lifetimes): a copy left in
+//! the profile goes stale at the CLI's next refresh, and the next window would
+//! hand it over, or the SPA would present it and revoke the CLI's whole token
+//! family. So the launch turns on `Launch::clear_site_storage`: the crate removes
+//! the profile's site storage before Chrome starts and again once it has stopped,
+//! keeping the cookies. A bundle the capture sees is therefore this sign-in's. A
+//! crash or a second Ctrl-C skips the second removal, and the next launch's
+//! removal covers it.
 //!
-//! That covers the bundle and nothing else. It is a full Chrome profile, kept
+//! That covers site storage and nothing else. It is a full Chrome profile, kept
 //! until `auth logout`, a failed sign-in included: besides the cookies it holds
 //! browsing history with full URLs, query strings included (so the sign-in's
-//! OIDC redirects, with their authorization code and state), the HTTP cache and
-//! site storage. Chrome's cookie encryption does not cover those, so `0700` is
-//! their only protection. On Linux with no desktop keyring Chrome encrypts
-//! cookies with a fixed, publicly known key, so there `0700` is all that protects
-//! the `idsrv` cookie too.
+//! OIDC redirects, with their authorization code and state), and the HTTP cache.
+//! Chrome's cookie encryption does not cover those, so `0700` is their only
+//! protection. On Linux with no desktop keyring Chrome encrypts cookies with a
+//! fixed, publicly known key, so there `0700` is all that protects the `idsrv`
+//! cookie too.
 
 use pk_cli_browser::{BrowserError, Capture, HostRule, Launch, DEFAULT_TIMEOUT};
 use pk_cli_core::CliError;
@@ -59,20 +63,14 @@ pub const SESSION_STORAGE_KEY: &str = "oidc.user:https://auth.nelnet.studentaid.
 /// readiness signal (the tab is closed the moment a value is read, so a
 /// premature read could not be retried).
 ///
-/// It takes the bundle out of `localStorage` as it reads it, so the kept
-/// profile holds no copy of the token family (the module docs say why). A
-/// bundle already past its `expires_at` is one an earlier sign-in left, so it
-/// is removed and not handed over, and the wait goes on for a new one. A value
-/// that is not JSON is handed over for `Session::parse_captured` to refuse by
-/// name.
+/// It only reads: the crate may evaluate it more than once, and a lost answer
+/// must not lose the bundle. `Launch::clear_site_storage` keeps a bundle from an
+/// earlier sign-in out of the profile, so nothing here has to tell one apart.
 pub fn expression() -> String {
     let key = serde_json::to_string(SESSION_STORAGE_KEY).expect("a str serializes");
     format!(
         "(() => {{ const v = localStorage.getItem({key}); \
-         if (!v || !v.includes('access_token')) return null; \
-         localStorage.removeItem({key}); \
-         let exp; try {{ exp = JSON.parse(v).expires_at; }} catch {{}} \
-         return typeof exp === 'number' && exp * 1000 <= Date.now() ? null : v; }})()"
+         return v && v.includes('access_token') ? v : null; }})()"
     )
 }
 
@@ -120,6 +118,7 @@ fn capture_session(
         Launch::new(BIN)
             .url(START_URL)
             .fresh_profile(fresh_profile)
+            .clear_site_storage(true)
             .quiet(quiet)
             .login_hint(login_hint),
         &session_capture()?,
@@ -210,17 +209,26 @@ mod tests {
     }
 
     #[test]
-    fn the_expression_takes_the_key_and_waits_for_a_live_token() {
+    fn the_expression_reads_the_key_and_waits_for_a_token() {
         assert_eq!(
             expression(),
             "(() => { const v = localStorage.getItem(\
              \"oidc.user:https://auth.nelnet.studentaid.gov:mma\"); \
-             if (!v || !v.includes('access_token')) return null; \
-             localStorage.removeItem(\
-             \"oidc.user:https://auth.nelnet.studentaid.gov:mma\"); \
-             let exp; try { exp = JSON.parse(v).expires_at; } catch {} \
-             return typeof exp === 'number' && exp * 1000 <= Date.now() ? null : v; })()"
+             return v && v.includes('access_token') ? v : null; })()"
         );
+    }
+
+    /// The crate may run it more than once, and a lost answer must not lose the
+    /// bundle, so it never writes to the page's storage.
+    #[test]
+    fn the_expression_writes_nothing() {
+        let e = expression();
+        assert_eq!(e.matches("localStorage").count(), 1, "{e}");
+        assert!(e.contains("localStorage.getItem("), "{e}");
+        for write in ["removeItem", "setItem", "clear(", "delete ", "cookie"] {
+            assert!(!e.contains(write), "{e}");
+        }
+        assert!(!e.contains("expires_at"), "{e}");
     }
 
     #[test]

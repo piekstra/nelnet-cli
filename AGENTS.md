@@ -13,8 +13,9 @@ this repo's code, it drifts.
 
 Every `pk-cli-*` crate is pinned to the same `cli-common` revision (see
 `Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`,
-whose kept profile needs cli-common v0.16.0 or later. cli-common v0.17.0's
-`pk-cli-auth` needs Rust 1.89.
+whose kept profile needs cli-common v0.16.0 or later and whose site-storage
+clearing and `profile_exists` need v0.19.0. Renewals take `pk-cli-auth`'s
+`refresh_lock`, which needs Rust 1.89.
 
 ## The single most important fact
 
@@ -112,10 +113,11 @@ cannot spend a code or lock the account. Still:
   only traffic it should see from the window. `docs/api.md` § How the CLI gets
   the initial bundle records the capture.
 - **The browser profile is kept on disk** (`--fresh-profile` skips it for one
-  sign-in), so **the capture must take the bundle out of `localStorage` as it
-  reads it**. A bundle left in the profile goes stale at the CLI's next refresh,
-  and handing it over or letting the SPA present it breaks the single-holder rule
-  below. `auth logout` removes the profile last, through `logout_browser`'s
+  sign-in), so **the launch keeps `clear_site_storage` on and the expression only
+  reads**. A bundle left in the profile goes stale at the CLI's next refresh, and
+  handing it over or letting the SPA present it breaks the single-holder rule
+  below. The crate may evaluate the expression more than once, so a write in it
+  could lose the bundle. `auth logout` removes the profile last, through `logout_browser`'s
   closure: the binary binds `pk_cli_browser::forget_profile`, tests bind
   `forget_profile_in` under a temp dir. **No test may reach the owner's real
   profile.** It is a full Chrome profile that outlives even a failed sign-in
@@ -125,8 +127,10 @@ cannot spend a code or lock the account. Still:
   (`failed_sign_in`). Logout attempts every step, keychain first and profile last,
   then names what was cleared and what remains (`incomplete_logout`). The config is
   read only in the arms that use it, so a broken file doesn't stop logout; `dispatch`
-  takes the logout as a seam so a test can run it with neither keychain nor profile. `auth status` cannot report it
-  until `pk-cli-browser` can say whether it exists; don't recompute its path here.
+  takes the logout as a seam so a test can run it with neither keychain nor profile.
+  `auth status` reports the profile through `browser_profile_status`'s closure: the
+  binary binds `profile_exists`, tests bind `profile_exists_in`. Don't recompute its
+  path here.
 - `with_reauth` retries **once** and never loops. The recovery step is
   `client::refresh_or_relogin`: exchange the refresh token, and only if that is
   dead run the configured `refresh_command` (the reference capture script in
@@ -135,6 +139,23 @@ cannot spend a code or lock the account. Still:
   presenting an already-rotated token revokes the whole family. So the CLI must
   be the sole holder of a captured bundle — don't refresh concurrently against a
   live browser session on the same account. See `docs/api.md` § Token lifetimes.
+  Two `nlnt` processes cannot race each other: `client::refresh_or_relogin` posts
+  its grant under `pk_cli_auth::refresh_lock::RefreshLock`
+  (`~/.config/nlnt/token-refresh.lock`, holding nothing), re-reads the session
+  once it holds the lock, and posts no grant if the stored session (access or
+  refresh token) differs from the one it presented.
+  A login and a logout hold it around their keychain write only, never across the
+  sign-in: `before_signin` first, `store_signin` for the write, and a logout's
+  delete runs with or without it (`forget_for_binary`).
+- **One capture at a time.** The capture command can spend a one-time code, so
+  `capture_once` runs it under a second empty file, `token-capture.lock`, outside
+  the refresh lock so a login or logout never waits on a capture. A process that
+  finds it held waits, uses what that capture stored, and if nothing was stored
+  fails rather than spending another code. A capture is stopped after 5 minutes,
+  SIGTERM then SIGKILL 20 s later, though anything it started may keep running; it
+  stays in `nlnt`'s process group so Ctrl-C reaches all of it. The reference script
+  gives up after 4 minutes and stops Chrome on SIGTERM, so its teardown runs first. A sign-in's or logout's result stands over a capture
+  that finishes later.
 - The unattended full-login path burns a real MFA code; the capture script
   prefers silent renewal (persistent profile) precisely to avoid that.
 

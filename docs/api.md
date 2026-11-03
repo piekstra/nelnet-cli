@@ -86,44 +86,53 @@ holds the capture:
 | Read from | pages on exactly `nelnet.studentaid.gov` (`HostRule::exact`): an `https` page on the default port, matched label for label, whose document's own `location.hostname` matches too |
 | Never touched | `auth.nelnet.studentaid.gov` (Akamai, the bot checks): the CLI evaluates nothing there and navigates nothing there; the owner's own sign-in passes through it in the window. `mmaapi` is reached only by the verifying read afterwards, over the CLI's HTTP client |
 | What is read | `localStorage['oidc.user:https://auth.nelnet.studentaid.gov:mma']`, the value the DevTools fallback copies. No cookies |
-| Ready when | the value contains `access_token` and its `expires_at` has not passed; before that the expression answers `null` |
-| Then | the value is removed from `localStorage` as it is read, the tab is closed at once and Chrome is stopped. The profile stays on disk |
+| Ready when | the value contains `access_token`; before that the expression answers `null` |
+| Then | the tab is closed at once and Chrome is stopped. The crate then removes the profile's site storage (`Launch::clear_site_storage`). The profile stays on disk with its cookies |
 
 The expression (`browser::expression`, pinned by a unit test):
 
 ```js
-(() => { const v = localStorage.getItem("oidc.user:https://auth.nelnet.studentaid.gov:mma"); if (!v || !v.includes('access_token')) return null; localStorage.removeItem("oidc.user:https://auth.nelnet.studentaid.gov:mma"); let exp; try { exp = JSON.parse(v).expires_at; } catch {} return typeof exp === 'number' && exp * 1000 <= Date.now() ? null : v; })()
+(() => { const v = localStorage.getItem("oidc.user:https://auth.nelnet.studentaid.gov:mma"); return v && v.includes('access_token') ? v : null; })()
 ```
 
 What follows from it:
 
 - **The CLI is the sole holder from the start.** The tab closes before the SPA
-  can renew the token it just stored, and the read takes the bundle out of
-  `localStorage`, so the kept profile keeps no copy of the refresh-token family
-  for a later window to hand over or for the SPA to present. The single-holder
-  rule in § Token lifetimes holds without the owner doing anything; on the
-  DevTools path it is theirs to keep (close the tab). The removal reaching disk
-  before Chrome stops is **UNVERIFIED-LIVE**, so a bundle a later window finds
-  past its `expires_at` is removed and not read; one still inside its 15
-  minutes would be read, and could hold a token the CLI has since rotated.
+  can renew the token it just stored. `Launch::clear_site_storage` removes the
+  profile's site storage before Chrome starts and again once it has stopped, so
+  between runs the kept profile holds no copy of the refresh-token family for a
+  later window to hand over or for the SPA to present. A bundle the capture sees
+  is therefore this sign-in's, so the expression writes nothing and checks no
+  expiry. The single-holder rule in § Token lifetimes holds without the owner
+  doing anything; on the DevTools path it is theirs to keep (close the tab).
+- **After a crash the bundle can stay on disk until the next launch.** A crash or
+  a second Ctrl-C skips the removal after Chrome stops, as does a Chrome still
+  running in the profile once the spawned process has ended, with a warning. The
+  next launch's removal covers each, before Chrome starts, and `auth logout`
+  removes it with the profile.
 - **A later sign-in can need less input (UNVERIFIED-LIVE).** The kept profile
   (`<data dir>/piekstra.nlnt/browser-profile`) keeps the identity host's cookies
   but no bundle. While `idsrv` lasts (~1 hour, § Token lifetimes) the SPA should
   get a new bundle with no password or code; after that, a device Nelnet
   remembers (`SaveTrustedDevice`) should skip only the code. Each sign-in mints
-  a new token family. `--fresh-profile` signs in through a scratch profile,
+  a new token family. The crate asks Chrome to quit over its debug port and waits
+  up to 5 s, so a persistent cookie set just before the close reaches disk;
+  cli-common measured that in headless Chrome 156 only, so a visible window is
+  **UNVERIFIED-LIVE**. `--fresh-profile` signs in through a scratch profile,
   removed when the window closes, so that sign-in is an unknown device and asks
   for the code.
 - **The profile keeps more than cookies.** It is a full Chrome profile, so the
   history keeps the sign-in's OIDC redirects with their query strings, beside the
-  HTTP cache and site storage; SECURITY.md lists what it holds, and its exact
+  HTTP cache; SECURITY.md lists what it holds, and its exact
   contents for this portal are **UNVERIFIED-LIVE**. Any sign-in that fails once
   the window has opened leaves it in place (a timeout, a closed window, Ctrl-C, a
   refused verifying read, a bundle the parser refuses, a failed keychain write),
-  and the error says so and names `nlnt auth logout`. `auth status` does not report it.
+  and the error says so and names `nlnt auth logout`. `auth status` reports whether it exists
+  (`browser_profile`), not whether it is signed in, and a profile needing repair is
+  a warning with the field left out.
 - The verifying read must return data. An empty body, `null`, `{}` or anything else
   that isn't JSON with something in it is exit 5 with nothing stored, since a stale
-  session from the kept profile could get one.
+  session could get one.
 - `auth logout` removes the kept profile as its last step, and attempts every step
   even when one fails, or when the config can't be parsed (`--forget` clears that
   file). A failed step, or a sign-in or a Chrome using the profile,
@@ -209,6 +218,16 @@ header for the full env knobs (`NLNT_USERNAME`, `NLNT_PASSWORD`,
 `NLNT_KEYCHAIN_SERVICE`, `NLNT_KEYCHAIN_ACCOUNT`, `NLNT_CAPTURE_PROFILE`,
 `NLNT_CAPTURE_HEADED`, `NLNT_CHROME`, `NLNT_PLAYWRIGHT_DIR`, `NLNT_OTP_COMMAND`).
 
+**Stopping a capture.** `nlnt` stops a capture command after 5 minutes: SIGTERM, then
+SIGKILL 20 s later. The reference script stays inside that: it gives up after 4
+minutes, limits each `$NLNT_OTP_COMMAND` run to 15 s, and stops Chrome on SIGTERM. A
+hard kill still skips its teardown, as does a `refresh_command` that is more than one
+command, where only the shell gets the signal. That can leave its Chrome running on
+the signed-in profile with the debugging port open (9455 unless
+`NLNT_CAPTURE_PORT` says otherwise), so any local process can read the token bundle,
+and its page can renew as a second holder of the family. Find it with
+`lsof -iTCP:9455 -sTCP:LISTEN` and stop that process.
+
 ### Token lifetimes — what's measured, what isn't
 
 | Value | How long | Provenance |
@@ -235,8 +254,17 @@ revocation from the competing browser, not the token's own TTL.
 
 **Operational rule that follows:** after capture, the CLI should be the *sole*
 holder of the bundle. Don't run `nlnt` refreshes concurrently against a browser
-session still logged into the same account — and don't run two refreshes at
-once — or reuse detection can revoke the family. The unattended capture script
+session still logged into the same account, or reuse detection can revoke the
+family. Two `nlnt` processes cannot do this to each other: a grant runs under an
+exclusive lock on `~/.config/nlnt/token-refresh.lock` (an empty file;
+`pk_cli_auth::refresh_lock`), reads the session again once it holds the lock, and
+posts no grant if another process already renewed. A wait is bounded at 75 s, then
+exit 5 naming the lock, with nothing sent. A capture command runs outside that lock,
+under `token-capture.lock` beside it, so one runs at a time and a login or logout
+never waits on one. A process that finds it held waits for that capture and uses its
+session; if it stored none, that process fails rather than spending another one-time
+code. A capture is stopped after 5 minutes, exit 5, though anything it started may keep
+running (§ Unattended re-login). The unattended capture script
 sidesteps this by re-minting from the browser only when asked (a short-lived
 headless launch that exits), rather than holding a competing refresh token; and
 when a revocation *does* happen, the next command's capture-command fallback

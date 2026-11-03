@@ -9,7 +9,12 @@
 use assert_cmd::Command;
 
 fn nlnt() -> Command {
-    Command::cargo_bin("nlnt").expect("binary builds")
+    let mut c = Command::cargo_bin("nlnt").expect("binary builds");
+    // No test touches the real token-refresh lock.
+    let home = std::env::temp_dir().join(format!("nlnt-test-home-{}", std::process::id()));
+    std::fs::create_dir_all(&home).expect("temp dir");
+    c.env("HOME", &home).env("USERPROFILE", &home);
+    c
 }
 
 /// Every top-level command. Reused by three tests, so a rename trips them.

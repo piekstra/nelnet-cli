@@ -3,6 +3,7 @@
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use pk_cli_auth::refresh_lock::RefreshLock;
 use pk_cli_auth::{AuthMethod, AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
 use pk_cli_browser::{BrowserArgs, BrowserError};
 use pk_cli_config::ConfigStore;
@@ -170,7 +171,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             &cli.common,
             store,
             forget,
-            || creds.delete(SESSION_ACCOUNT),
+            // Under the lock a renewal holds if it can be had, so one in flight
+            // cannot store the session again after the logout. The delete runs
+            // either way: the lock must not keep a credential on the machine.
+            || RefreshLock::forget_for_binary(BIN, || creds.delete(SESSION_ACCOUNT)),
             || pk_cli_browser::forget_profile(BIN),
         )
     })
@@ -303,6 +307,7 @@ fn auth(
                     status.session_valid = Some(fresh || session.refresh_token.is_some());
                 }
             }
+            status.browser_profile = browser_profile_status(|| pk_cli_browser::profile_exists(BIN));
             status.emit(cli.common.json);
             Ok(())
         }
@@ -314,6 +319,9 @@ fn auth(
                     "a session is already stored; pass --overwrite to replace it".into(),
                 ));
             }
+            // Before the read: a secret piped in once cannot be read again. It does
+            // not wait on a busy lock, so bad input still fails at once.
+            RefreshLock::for_binary(BIN)?.try_hold(|| Ok(()))?;
             let secret = args.source.read(None)?;
             let session = Session::parse_captured(secret.expose())?;
             // Verify with a live read before storing, same as `auth login`:
@@ -328,6 +336,22 @@ fn auth(
                 );
             }
             Ok(())
+        }
+    }
+}
+
+/// `auth status`'s browser field: whether a `--browser` sign-in keeps a profile
+/// here, not whether it is signed in. `auth status` works whatever state the CLI is
+/// in, so a profile that needs repair is a warning on stderr and leaves the field
+/// out. The check is passed in: the binary binds it to `profile_exists(BIN)`, the
+/// tests to `profile_exists_in` under a temp dir, so a test never reads the owner's
+/// real data dir.
+fn browser_profile_status(exists: impl FnOnce() -> Result<bool, BrowserError>) -> Option<bool> {
+    match exists() {
+        Ok(kept) => Some(kept),
+        Err(e) => {
+            eprintln!("warning: {e}");
+            None
         }
     }
 }
@@ -452,7 +476,8 @@ fn bare_message(error: &CliError) -> &str {
 
 /// `message` with `first`'s exit code. `Keychain` and `Other` both exit 1 and only
 /// `Other` adds no prefix. `NotFound`, `Upstream` and `ConfirmationRequired` alone
-/// have their codes, so their `Display` prefix stays; no logout step returns them.
+/// have their codes, so their `Display` prefix stays, once: the lock's delete can
+/// return `Upstream` when a renewal outlasts its wait.
 fn with_exit_code_of(first: CliError, message: String) -> CliError {
     match first {
         CliError::Keychain(_) | CliError::Other(_) => CliError::Other(message),
@@ -515,6 +540,7 @@ fn login(
     let fresh_profile = args.browser.fresh_profile;
     let retry = retry_command(browser, fresh_profile, login.overwrite);
     let verify = !login.no_verify;
+    let lock = RefreshLock::for_binary(BIN)?;
     // Both paths are one from the value on: the stdin parser, one verifying
     // read, the keychain.
     let store_session = |raw: &Secret| -> Result<(), CliError> {
@@ -529,8 +555,13 @@ fn login(
             .map_err(|e| rejected_at_login(e, &retry))
     };
     if browser {
+        // Before anyone signs in: the write needs this lock.
+        lock.before_signin()?;
         nlnt::browser::sign_in(cli.common.quiet, fresh_profile, &retry, store_session)?;
     } else {
+        // Before the read: a session piped in once cannot be read again. It does
+        // not wait on a busy lock, so bad input still fails at once.
+        lock.try_hold(|| Ok(()))?;
         let prompt = if login.non_interactive {
             None
         } else {
@@ -622,10 +653,12 @@ fn refresh(
         .filter(|s| !s.trim().is_empty())
         .or_else(|| cfg.refresh_command());
 
+    let presented = client::stored_session(creds)?;
     let refreshed = client::refresh_or_relogin(
         cfg,
         creds,
         command.as_deref(),
+        presented.as_ref(),
         cli.common.verbose,
         cli.common.quiet,
     )?;
@@ -733,6 +766,27 @@ mod tests {
             assert_eq!(fresh.exit_code(), code, "{fresh}");
             assert!(!fresh.to_string().contains("stays on disk"), "{fresh}");
         }
+    }
+
+    /// `auth status` reports the kept profile through `profile_exists_in`, so the
+    /// test never reads the owner's real data dir, and one needing repair is left
+    /// off the wire.
+    #[test]
+    fn auth_status_reports_the_kept_browser_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let exists = || pk_cli_browser::profile_exists_in(root.path(), BIN);
+        assert_eq!(browser_profile_status(exists), Some(false));
+        let profile = root.path().join("piekstra.nlnt").join("browser-profile");
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        assert_eq!(browser_profile_status(exists), Some(true));
+
+        let mut status = AuthStatus::new(true, true, AuthMethod::BrowserSession);
+        status.browser_profile = browser_profile_status(exists);
+        assert_eq!(status.to_json()["browser_profile"], true);
+
+        let refused = || Err(BrowserError::Profile("needs repair".into()));
+        status.browser_profile = browser_profile_status(refused);
+        assert!(status.to_json().get("browser_profile").is_none());
     }
 
     fn all_cleared() -> Vec<LogoutStep> {
@@ -847,6 +901,31 @@ mod tests {
             assert!(m.contains(reason), "{m}");
         }
         assert!(m.contains("`nlnt auth logout --forget` again"), "{m}");
+    }
+
+    /// A failure only `Upstream` can carry keeps exit 5, the lock's answer when a
+    /// renewal outlasts its wait, with its prefix once and the profile still removed.
+    #[test]
+    fn an_upstream_failure_keeps_its_exit_code_and_one_prefix() {
+        let mut attempted = false;
+        let steps = vec![(
+            "the session",
+            Err(CliError::Upstream("run this logout again".into())),
+        )];
+        let err = logout_browser(steps, || {
+            attempted = true;
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(attempted);
+        assert_eq!(err.exit_code(), 5, "{err}");
+        let m = err.to_string();
+        assert!(
+            m.starts_with("network/upstream error: logout incomplete: "),
+            "{m}"
+        );
+        assert_eq!(m.matches("network/upstream error").count(), 1, "{m}");
+        assert!(m.contains("(the session: run this logout again)"), "{m}");
     }
 
     /// No prefix leads the report or repeats inside it, whichever variants the

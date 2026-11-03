@@ -69,10 +69,11 @@ carry over and a later sign-in may need less input: no one-time code on a device
 Nelnet remembers. `nlnt auth login --browser --fresh-profile` signs in once
 through a scratch profile, deleted afterwards, and leaves the kept one alone.
 
-The trade is more than cookies. `nlnt` removes the token bundle from the page as
-it reads it, but this is a full Chrome profile, so it also keeps browsing history
-with full URLs, query strings included, the HTTP cache and site storage, for
-whatever loads in that window. Chrome's cookie encryption does not cover those,
+The trade is more than cookies. `nlnt` clears the page's storage, the token bundle
+with it, before Chrome starts and once it stops; after a crash, the next launch
+clears it. But this is a full Chrome profile, so it also keeps browsing history with
+full URLs, query strings included, and the HTTP cache, for whatever loads in that
+window. Chrome's cookie encryption does not cover those,
 and on Linux with no desktop keyring it uses a fixed, publicly known key, which
 protects the session cookie no better. The directory's `0700` mode is then the
 only protection, and ordinary backups usually include the directory
@@ -81,8 +82,8 @@ redirects stay in the history, query strings and all. **Use `--fresh-profile` if
 you view loan or statement pages in that window.**
 
 The profile stays after a failed sign-in too, possibly with a live session, and
-the error says so. `nlnt auth status` reads only the keychain and config, so it does
-not show the profile. `nlnt auth logout` removes it and clears the stored session with it.
+the error says so. `nlnt auth status` says whether the profile exists
+(`browser_profile`), not whether it is signed in. `nlnt auth logout` removes it and clears the stored session with it.
 It attempts every step even when one fails. If one fails, or a sign-in or a Chrome
 window is using the profile, it exits non-zero and says what was cleared, what
 remains and how to finish.
@@ -195,7 +196,7 @@ token) and the portal password live in the macOS keychain under `piekstra.nlnt`.
 | 2 | usage error |
 | 3 | auth required / session expired |
 | 4 | not found |
-| 5 | upstream / provider error (incl. a download that was not a PDF) |
+| 5 | upstream / provider error (incl. a download that was not a PDF), or another `nlnt` process holding a token lock past the wait |
 | 6 | confirmation required (or a write refused — this CLI is read-only) |
 
 ## Read-only, and how that is enforced
