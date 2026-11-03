@@ -181,6 +181,16 @@ header for the full env knobs (`NLNT_USERNAME`, `NLNT_PASSWORD`,
 `NLNT_KEYCHAIN_SERVICE`, `NLNT_KEYCHAIN_ACCOUNT`, `NLNT_CAPTURE_PROFILE`,
 `NLNT_CAPTURE_HEADED`, `NLNT_CHROME`, `NLNT_PLAYWRIGHT_DIR`, `NLNT_OTP_COMMAND`).
 
+**Stopping a capture.** `nlnt` stops a capture command after 5 minutes: SIGTERM, then
+SIGKILL 20 s later. The reference script stays inside that: it gives up after 4
+minutes, limits each `$NLNT_OTP_COMMAND` run to 15 s, and stops Chrome on SIGTERM. A
+hard kill still skips its teardown, as does a `refresh_command` that is more than one
+command, where only the shell gets the signal. That can leave its Chrome running on
+the signed-in profile with the debugging port open (9455 unless
+`NLNT_CAPTURE_PORT` says otherwise), so any local process can read the token bundle,
+and its page can renew as a second holder of the family. Find it with
+`lsof -iTCP:9455 -sTCP:LISTEN` and stop that process.
+
 ### Token lifetimes — what's measured, what isn't
 
 | Value | How long | Provenance |
@@ -217,7 +227,7 @@ under `token-capture.lock` beside it, so one runs at a time and a login or logou
 never waits on one. A process that finds it held waits for that capture and uses its
 session; if it stored none, that process fails rather than spending another one-time
 code. A capture is stopped after 5 minutes, exit 5, though anything it started may keep
-running. The unattended capture script
+running (§ Unattended re-login). The unattended capture script
 sidesteps this by re-minting from the browser only when asked (a short-lived
 headless launch that exits), rather than holding a competing refresh token; and
 when a revocation *does* happen, the next command's capture-command fallback

@@ -121,7 +121,8 @@ cannot spend a code or lock the account. Still:
   Two `nlnt` processes cannot race each other: `client::refresh_or_relogin` posts
   its grant under `pk_cli_auth::refresh_lock::RefreshLock`
   (`~/.config/nlnt/token-refresh.lock`, holding nothing), re-reads the session
-  once it holds the lock, and posts no grant if the stored refresh token changed.
+  once it holds the lock, and posts no grant if the stored session (access or
+  refresh token) differs from the one it presented.
   A login and a logout hold it around their keychain write only, never across the
   sign-in: `before_signin` first, `store_signin` for the write, and a logout's
   delete runs with or without it (`forget_for_binary`).
@@ -130,8 +131,9 @@ cannot spend a code or lock the account. Still:
   the refresh lock so a login or logout never waits on a capture. A process that
   finds it held waits, uses what that capture stored, and if nothing was stored
   fails rather than spending another code. A capture is stopped after 5 minutes,
-  though anything it started may keep running; it stays in `nlnt`'s process group
-  so Ctrl-C reaches all of it. A sign-in's or logout's result stands over a capture
+  SIGTERM then SIGKILL 20 s later, though anything it started may keep running; it
+  stays in `nlnt`'s process group so Ctrl-C reaches all of it. The reference script
+  gives up after 4 minutes and stops Chrome on SIGTERM, so its teardown runs first. A sign-in's or logout's result stands over a capture
   that finishes later.
 - The unattended full-login path burns a real MFA code; the capture script
   prefers silent renewal (persistent profile) precisely to avoid that.

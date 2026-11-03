@@ -49,6 +49,13 @@ const PROFILE = process.env.NLNT_CAPTURE_PROFILE || join(homedir(), '.cache/nlnt
 const HEADED = process.env.NLNT_CAPTURE_HEADED === '1';
 const log = (...a) => console.error('[nlnt-capture]', ...a); // diagnostics → stderr
 
+// nlnt stops a capture command after 5 minutes, with SIGTERM and then SIGKILL 20 s
+// later. These bounds sit inside that, so the teardown below always runs: a Chrome
+// left behind keeps an unauthenticated debugging port open on a signed-in profile,
+// and its page can go on renewing as a second holder of the token family.
+const WATCHDOG_MS = 240000;
+const OTP_COMMAND_TIMEOUT_MS = 15000;
+
 function chromePath() {
   if (process.env.NLNT_CHROME) return process.env.NLNT_CHROME;
   const mac = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -124,7 +131,10 @@ async function fetchOtp() {
   }
   for (let attempt = 0; attempt < 12; attempt++) {
     try {
-      const text = execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+      const text = execSync(cmd, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: OTP_COMMAND_TIMEOUT_MS,
+      }).toString();
       const m = text.match(/\b(\d{6})\b/);
       if (m) return m[1];
     } catch (e) {
@@ -290,7 +300,17 @@ async function main() {
   const proc = spawn(chrome, args, { stdio: 'ignore', detached: false });
 
   let browser;
-  try {
+  let giveUp;
+  const gaveUp = new Promise((_, reject) => {
+    giveUp = reject;
+  });
+  const watchdog = setTimeout(
+    () => giveUp(new Error(`gave up after ${WATCHDOG_MS / 1000} s`)),
+    WATCHDOG_MS,
+  );
+  process.on('SIGTERM', () => giveUp(new Error('stopped by SIGTERM')));
+
+  const capture = async () => {
     // Wait for the CDP endpoint.
     for (let i = 0; i < 40 && !browser; i++) {
       try {
@@ -335,9 +355,15 @@ async function main() {
       );
     }
     process.stdout.write(raw.trim() + '\n'); // the ONLY thing on stdout — guaranteed fresh
+  };
+
+  try {
+    await Promise.race([capture(), gaveUp]);
   } finally {
+    clearTimeout(watchdog);
     try {
-      await browser?.close();
+      // Bounded: stopping Chrome below must not wait on a hung disconnect.
+      await Promise.race([browser?.close(), new Promise((r) => setTimeout(r, 3000))]);
     } catch {
       /* ignore */
     }

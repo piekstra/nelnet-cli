@@ -460,7 +460,7 @@ pub fn run_capture_command(command: &str, verbose: bool) -> Result<Session, CliE
     }
     let mut sh = std::process::Command::new("sh");
     sh.arg("-c").arg(command);
-    let output = output_within(sh, CAPTURE_DEADLINE)?;
+    let output = output_within(sh, CAPTURE_DEADLINE, CAPTURE_STOP_GRACE)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let hint = stderr.trim().lines().next_back().unwrap_or("").trim();
@@ -483,15 +483,17 @@ pub fn run_capture_command(command: &str, verbose: bool) -> Result<Session, CliE
     Session::parse_captured(&stdout)
 }
 
-/// `Command::output`, stopping the command once `deadline` passes. The pipes are
-/// drained on threads, so a chatty command cannot block on a full one, and a child
-/// that exits while something it started still holds them counts as running.
+/// `Command::output`, stopping the command once `deadline` passes: SIGTERM first so
+/// it can clean up after itself, then SIGKILL after `grace`. The pipes are drained on
+/// threads, so a chatty command cannot block on a full one, and a child that exits
+/// while something it started still holds them counts as running.
 ///
 /// The command stays in this process's group, so Ctrl-C reaches all of it. That
 /// means the deadline can only stop the command itself.
 fn output_within(
     mut command: std::process::Command,
     deadline: Duration,
+    grace: Duration,
 ) -> Result<std::process::Output, CliError> {
     use std::io::Read;
     use std::process::Stdio;
@@ -518,8 +520,7 @@ fn output_within(
         match child.try_wait().map_err(failed)? {
             Some(status) if stdout.is_finished() && stderr.is_finished() => break status,
             _ if started.elapsed() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop(&mut child, grace);
                 return Err(CliError::Upstream(format!(
                     "capture command was stopped after running for {deadline:?}; anything it \
                      started may still be running, so check that before trying again"
@@ -539,6 +540,26 @@ fn output_within(
         stdout: collected(stdout)?,
         stderr: collected(stderr)?,
     })
+}
+
+fn stop(child: &mut std::process::Child, grace: Duration) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-s", "TERM", &child.id().to_string()])
+            .status();
+        let asked = std::time::Instant::now();
+        while asked.elapsed() < grace {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = grace;
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Renew the session, preferring the cheap path.
@@ -602,9 +623,12 @@ pub fn refresh_or_relogin(
     }
 }
 
-/// How long a capture command may run: past the reference script's worst case,
-/// a full login that polls a minute for its one-time code.
+/// How long a capture command may run: past the reference script's own 4-minute
+/// limit, so its teardown normally runs before this does.
 const CAPTURE_DEADLINE: Duration = Duration::from_secs(300);
+/// How long a stopped capture has to clean up: past the reference script's 15 s
+/// limit on its one-time-code command, during which it cannot handle a signal.
+const CAPTURE_STOP_GRACE: Duration = Duration::from_secs(20);
 /// A process waiting for another's capture waits this much past its deadline.
 const CAPTURE_LOCK_MARGIN: Duration = Duration::from_secs(15);
 /// Beside the refresh lock, and as empty. It keeps two captures from running at
@@ -1426,13 +1450,13 @@ mod tests {
     }
 
     #[cfg(unix)]
+    const NO_HURRY: Duration = Duration::from_secs(30);
+
+    #[cfg(unix)]
     #[test]
     fn a_capture_within_its_deadline_returns_its_output() {
-        let out = output_within(
-            sh("echo dummy-out; echo dummy-err >&2"),
-            Duration::from_secs(30),
-        )
-        .unwrap();
+        let out =
+            output_within(sh("echo dummy-out; echo dummy-err >&2"), NO_HURRY, NO_HURRY).unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "dummy-out");
         assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "dummy-err");
@@ -1440,14 +1464,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_capture_past_its_deadline_is_stopped_and_exits_5() {
+    fn a_capture_past_its_deadline_is_asked_to_stop_so_it_can_clean_up() {
         let dir = tempfile::tempdir().unwrap();
-        let pidfile = dir.path().join("pid");
-        let script = format!("echo $$ > '{}'; exec sleep 30", pidfile.display());
-        let err = output_within(sh(&script), Duration::from_secs(2)).unwrap_err();
+        let marker = dir.path().join("cleaned-up");
+        let script = format!(
+            "trap 'echo done > \"{}\"; exit 0' TERM; sleep 5 & wait",
+            marker.display()
+        );
+        let err = output_within(sh(&script), Duration::from_secs(3), NO_HURRY).unwrap_err();
         assert_eq!(err.exit_code(), 5, "{err}");
         assert!(err.to_string().contains("stopped"), "{err}");
         assert!(err.to_string().contains("may still be running"), "{err}");
+        assert!(marker.exists(), "the command never got to clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_capture_that_ignores_being_asked_is_killed_after_the_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!(
+            "trap '' TERM; echo $$ > '{}'; exec sleep 30",
+            pidfile.display()
+        );
+        let err = output_within(
+            sh(&script),
+            Duration::from_secs(3),
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 5, "{err}");
         let pid = std::fs::read_to_string(&pidfile).unwrap();
         let alive = std::process::Command::new("kill")
             .args(["-0", pid.trim()])
@@ -1455,13 +1501,13 @@ mod tests {
             .status()
             .unwrap()
             .success();
-        assert!(!alive, "the command was stopped and reaped");
+        assert!(!alive, "the command was killed and reaped");
     }
 
     #[cfg(unix)]
     #[test]
     fn a_background_child_holding_the_pipes_counts_as_running() {
-        let err = output_within(sh("sleep 5 &"), Duration::from_millis(200)).unwrap_err();
+        let err = output_within(sh("sleep 5 &"), Duration::from_millis(200), NO_HURRY).unwrap_err();
         assert!(err.to_string().contains("stopped"), "{err}");
     }
 

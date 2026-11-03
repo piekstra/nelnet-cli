@@ -25,6 +25,11 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   included. The DevTools port has no authentication, so while the window is
   open any local process that can reach it can read the window's session; the
   window stays open only for the sign-in.
+- **A hard-killed capture can leave a browser behind.** `nlnt` stops a capture
+  command after 5 minutes, and the reference script stops its Chrome first. If the
+  script is killed outright, its Chrome stays up on the signed-in profile with an
+  unauthenticated debugging port, which any local process can read the token bundle
+  through. `docs/api.md` § Unattended re-login says how to find and stop it.
 - **Secrets live only in the macOS keychain**, service `piekstra.nlnt`. Never a
   dotfile, never the config file (`~/.config/nlnt/config.json`), never an
   environment variable written to disk. `~/.config/nlnt/token-refresh.lock` is an
