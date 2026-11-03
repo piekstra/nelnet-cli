@@ -343,6 +343,7 @@ fn auth(
                     creds.service()
                 );
             }
+            emit_login_result(cli, true);
             Ok(())
         }
     }
@@ -624,24 +625,24 @@ fn login(
             creds.service()
         );
     }
-    output::emit(
-        cli.common.json,
-        "auth-login",
-        login_result(verify && unverified.is_none()),
-        |_| {},
-    );
+    emit_login_result(cli, verify && unverified.is_none());
     Ok(())
 }
 
-/// `auth login --json`, which runs only once the session is stored. `verified` is
-/// there only when it is false, so a script can test for it and a verified login's
-/// result stays as it would be without the field.
+/// What `--json` prints once a session is stored. Nothing on stdout without it,
+/// where the text is on stderr.
+fn emit_login_result(cli: &Cli, verified: bool) {
+    output::emit(
+        cli.common.json,
+        "auth-login",
+        login_result(verified),
+        |_| {},
+    );
+}
+
+/// `verified` says whether a read accepted the session.
 fn login_result(verified: bool) -> serde_json::Value {
-    if verified {
-        serde_json::json!({ "stored": true })
-    } else {
-        serde_json::json!({ "stored": true, "verified": false })
-    }
+    serde_json::json!({ "stored": true, "verified": verified })
 }
 
 /// `auth status` makes no request, so it isn't what tests the session. A later
@@ -1203,10 +1204,10 @@ mod tests {
     }
 
     #[test]
-    fn the_login_result_says_verified_only_when_it_is_false() {
+    fn the_login_result_always_says_whether_a_read_accepted_the_session() {
         assert_eq!(
             output::tagged("auth-login", login_result(true)),
-            serde_json::json!({ "schema": "auth-login/v1", "stored": true })
+            serde_json::json!({ "schema": "auth-login/v1", "stored": true, "verified": true })
         );
         assert_eq!(
             output::tagged("auth-login", login_result(false)),
