@@ -228,7 +228,7 @@ your copy of `nlnt`, and call Nelnet with the session in your OS keychain.
 | `nelnet_payments` | What did I pay, and how much reached principal? Payments by `since`/`until`, or upcoming ones with `scheduled` |
 | `nelnet_repayment` | What is due next? Status, plan, next payment, recertification date, autopay enrollment and income-driven applications |
 | `nelnet_tax` | What goes on the 1098-E line? Nelnet's running total of deductible interest, with its as-of date |
-| `nelnet_documents` | Has a statement arrived? Published documents by date and category, with no file contents; `nlnt documents download <id>` saves one |
+| `nelnet_documents` | Has a statement arrived? Published documents by date and category, narrowed by `category`, `tax_year` or `since`/`until` (`category: "tax"` is `documents list --tax`), with no file contents; `nlnt documents download <id>` saves one |
 
 No tool can make or schedule a payment, change autopay or a repayment plan, or change
 anything at Nelnet: there is no such tool, the tools have no verb but `GET`, they ask
@@ -268,8 +268,11 @@ $ claude plugin install nelnet-cli@piekstra-plugins
 [latest release](https://github.com/piekstra/nelnet-cli/releases/latest) and open it.
 It asks for nothing: the bundled `nlnt` reads what your installed `nlnt` stored. On
 macOS the bundled binary is a different program to the keychain, so its first call
-raises a keychain prompt for the `piekstra.nlnt` session; choose **Always Allow**, or
-every call will ask again.
+raises a keychain prompt to read the `piekstra.nlnt` session, and its first renewal one
+to write it back; choose **Always Allow** for each, or every call will ask again. A new
+version of the extension is a new program to the keychain, and can ask again. While a
+prompt waits for you, tool calls answer that one may be waiting. There is no Windows
+build; [`SECURITY.md`](SECURITY.md) says why.
 
 Any other MCP client that launches a local server can run `nlnt mcp`.
 

@@ -16,8 +16,11 @@ Earlier releases are described on the GitHub releases page.
 - A tool says what it does not know: an answer of the wrong shape is an error, a figure
   Nelnet did not state is absent rather than `0.00`, and no document title or account
   number appears in a result.
-- Releases attach `nlnt-<version>.mcpb`, a Claude Desktop extension, and a Windows
-  x86_64 tarball.
+- Releases attach `nlnt-<version>.mcpb`, a Claude Desktop extension, for macOS and Linux.
+  There is no Windows build; `SECURITY.md` says why.
+- `auth logout --forget` also removes the `mcp --http` bearer token.
+- `Portal::refresh` writes the stored session back before it spends the refresh token,
+  so a keychain prompt or refusal comes while that token can still be used.
 - `self-update` says to restart a running `nlnt mcp --http` and to install the new
   `.mcpb`.
 - A failure that got no answer from the portal no longer prints its URL.

@@ -158,7 +158,7 @@ pub fn undownloadable(doc: &Document) -> Option<String> {
 ///
 /// Scans for a plausible year rather than any four digits, so an account number
 /// or a form number ("1098") in the title is not mistaken for one.
-fn title_year(name: &str) -> Option<u32> {
+pub fn title_year(name: &str) -> Option<u32> {
     let chars: Vec<char> = name.chars().collect();
     for window in chars.windows(4) {
         if window.iter().all(|c| c.is_ascii_digit()) {

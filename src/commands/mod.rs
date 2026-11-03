@@ -24,6 +24,11 @@ pub use pk_cli_core::output::{rows_of as items, table_view};
 pub const AUTO_REFRESH_OFF: &str =
     "access token expired — run `nlnt auth refresh` (auto_refresh is off)";
 
+/// A lapsed access token when `auto_refresh` is off.
+pub fn auto_refresh_off() -> CliError {
+    CliError::Auth(AUTO_REFRESH_OFF.into())
+}
+
 /// Everything a command needs: the global flags, resolved config, and the
 /// keychain handle.
 pub struct Ctx<'a> {
@@ -86,7 +91,7 @@ impl Ctx<'_> {
         capture: Option<&str>,
     ) -> Result<(), CliError> {
         if !self.cfg.auto_refresh() {
-            return Err(CliError::Auth(AUTO_REFRESH_OFF.into()));
+            return Err(auto_refresh_off());
         }
         if !self.common.quiet {
             eprintln!("access token expired — refreshing");

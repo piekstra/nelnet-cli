@@ -660,6 +660,35 @@ fn category_narrows_documents_whatever_its_case() {
     assert_eq!(out["returned"], 0);
 }
 
+/// The rule `documents list --tax-year` has: a 1098-E for year N is published in N+1.
+#[test]
+fn tax_year_uses_the_year_a_title_names_and_else_the_date() {
+    let body = json!({"statementList": [
+        {"documentId": "named", "documentTitle": "2025 Form 1098-E", "letterType": "TAX",
+         "docReceivedDate": "2026-01-31T00:00:00"},
+        {"documentId": "dated", "documentTitle": "Tax Statement",
+         "docReceivedDate": "2025-02-01T00:00:00"},
+        {"documentId": "other", "documentTitle": "June Statement",
+         "docReceivedDate": "2026-06-01T00:00:00"},
+    ]})
+    .to_string();
+    let tools = with(Fixtures::default().answering(paths::STATEMENTS, &body));
+    let ids = |year: u32| {
+        let out = ok(&tools, DOCUMENTS_TOOL, json!({"tax_year": year}));
+        let items = out["items"].as_array().unwrap().clone();
+        let ids: Vec<String> = items
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect();
+        ids
+    };
+    assert_eq!(ids(2025), ["named", "dated"]);
+    assert_eq!(ids(2026), ["other"]);
+
+    let says = error(&tools, DOCUMENTS_TOOL, json!({"tax_year": 25}));
+    assert!(says.starts_with("usage:"), "{says}");
+}
+
 #[test]
 fn a_document_list_nelnet_did_not_give_is_an_error_not_no_documents() {
     for body in [
@@ -681,29 +710,20 @@ fn a_document_list_nelnet_did_not_give_is_an_error_not_no_documents() {
 
 const REMEDY: &str = "`nlnt auth login --browser --overwrite`";
 
-/// Each of these builds its message the way the client does, or from the constant
-/// the client builds it with, so a reworded one fails here.
+/// Each of these is what the client itself returns, so a reworded one fails here.
 #[test]
 fn a_missing_or_dead_session_names_the_one_command_that_fixes_it() {
-    let no_session: fn() -> CliError =
-        || CliError::Auth("no stored session — run `nlnt auth login --browser`".into());
     let lapsed: fn() -> CliError =
         || crate::client::guard("/api/1/loan/summary", 401, "application/json", "{}").unwrap_err();
-    let rejected: fn() -> CliError = || {
-        CliError::Auth(format!(
-            "{}{SIGN_IN_AGAIN} `nlnt auth login --browser --overwrite`",
-            crate::client::REFRESH_REJECTED
-        ))
-    };
-    let no_refresh: fn() -> CliError = || {
-        CliError::Auth(format!(
-            "{}{SIGN_IN_AGAIN} `nlnt auth login --browser --overwrite`",
-            crate::client::NO_REFRESH_TOKEN
-        ))
-    };
     let unreadable: fn() -> CliError =
-        || CliError::Other(format!("{SESSION_UNREADABLE}: expected value at line 1"));
-    for e in [no_session, lapsed, rejected, no_refresh, unreadable] {
+        || crate::client::session_unreadable("expected value at line 1");
+    for e in [
+        crate::client::no_stored_session,
+        lapsed,
+        crate::client::refresh_rejected,
+        crate::client::no_refresh_token,
+        unreadable,
+    ] {
         let says = failing_with(paths::TAX_INFO, TAX_TOOL, e);
         assert!(says.starts_with("auth:"), "{says}");
         assert!(says.contains(REMEDY), "{says}");
@@ -714,9 +734,7 @@ fn a_missing_or_dead_session_names_the_one_command_that_fixes_it() {
 
 #[test]
 fn auto_refresh_off_asks_for_a_refresh_and_not_a_sign_in() {
-    let says = failing_with(paths::TAX_INFO, TAX_TOOL, || {
-        CliError::Auth(AUTO_REFRESH_OFF.into())
-    });
+    let says = failing_with(paths::TAX_INFO, TAX_TOOL, crate::commands::auto_refresh_off);
     assert!(says.starts_with("auth:"), "{says}");
     assert!(says.contains("`nlnt auth refresh`"), "{says}");
     assert!(!says.contains("nlnt auth login"), "{says}");

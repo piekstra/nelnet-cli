@@ -2,7 +2,7 @@
 
 ## Reporting
 
-This is a private, single-household tool. Report anything sensitive directly to
+This is a single-household tool. Report anything sensitive directly to
 the repository owner rather than opening a public issue.
 
 ## What this tool handles
@@ -127,8 +127,7 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   response *structure* with every identifying and financial value replaced by an
   obvious dummy, enforced by a hygiene test (marker present, no token/cookie/SSN
   shapes, dummy UUIDs). Raw provider captures are never committed.
-- **This repo is written as if public.** It is private today; treat every commit
-  as though it were not.
+- **This repo is public.** Treat every commit accordingly.
 
 ## Multi-factor authentication
 
@@ -162,8 +161,28 @@ token under `token-refresh.lock`, the lock every other `nlnt` holds, so two runn
 copies never present one rotating token. A tool does not run `refresh_command`, even
 where one is configured: it drives a browser and may spend a one-time code, and a model
 must not be able to start that. A dead session is an error naming the command for a
-person to run. On macOS a call can raise a keychain prompt; a server left unattended
-waits on it.
+person to run.
+
+On macOS a call can raise a keychain prompt, and a server left unattended waits on it,
+holding `token-refresh.lock` if it was renewing, so other `nlnt` processes wait too.
+Before a renewal spends the refresh token, `Portal::refresh` writes the stored session
+back to the keychain, so a program macOS has not granted is asked, or refused, while the
+token is unspent. Refresh tokens rotate, and one lost after the POST can revoke the whole
+family at the next use.
+
+`nlnt auth logout` removes the session and does not touch `mcp-http-token` or stop `nlnt
+mcp --http`: after a later sign-in, whatever holds that bearer token can read through the
+tunnel again. `nlnt auth logout --forget` removes `mcp-http-token` too, and a server already
+running keeps the copy it read until it stops. To end the connector's access, run `nlnt mcp
+--new-token --overwrite` and restart the server (`launchctl kickstart -k gui/$(id -u)/com.piekstra.nlnt-mcp-http`);
+the old token works until the restart. To stop serving, run `launchctl bootout
+gui/$(id -u)/com.piekstra.nlnt-mcp-http`, stop the tunnel and delete `HOME_NELNET_TOKEN`.
+
+There is no Windows build. The session is one credential-store item holding an access
+token, a refresh token and an id token, and Windows limits an item to 2,560 bytes
+(1,280 UTF-16 units), with `pk-cli-secrets` not splitting one. The size of a real bundle
+has not been measured against that limit, and a bundle that outgrew it at a renewal
+would lose the rotated refresh token.
 
 **`nlnt mcp --http`** is the path for Claude on the web and mobile. It binds 127.0.0.1
 only, and is reached through a Cloudflare Tunnel and a Worker in your own account,

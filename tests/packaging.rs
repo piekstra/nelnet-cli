@@ -69,14 +69,21 @@ fn the_manifest_lists_exactly_the_served_tools() {
 /// for nothing and passes nothing: the binary reads the session `nlnt auth login
 /// --browser` stored in the OS keychain, and renews it there.
 #[test]
+fn the_extension_does_not_claim_windows() {
+    let m = manifest();
+    assert_eq!(m["compatibility"]["platforms"], json!(["darwin", "linux"]));
+    assert!(m["server"]["mcp_config"]["platform_overrides"]
+        .get("win32")
+        .is_none());
+}
+
+#[test]
 fn every_platform_runs_mcp_with_no_credential_in_its_config() {
     let m = manifest();
     assert!(m.get("user_config").is_none(), "no settings to fill in");
     let config = &m["server"]["mcp_config"];
     let mut configs = vec![config.clone()];
-    for os in ["win32", "linux"] {
-        configs.push(config["platform_overrides"][os].clone());
-    }
+    configs.push(config["platform_overrides"]["linux"].clone());
     for c in &configs {
         assert_eq!(c["args"], json!(["mcp"]), "{c}");
         assert!(

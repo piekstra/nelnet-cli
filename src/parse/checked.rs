@@ -17,6 +17,7 @@ use super::{
     as_date, as_money, as_nonzero_id, as_text, classify, letter_type_category, missing, plan_of,
     repayment, sort_newest_first,
 };
+use crate::commands::documents::title_year;
 use crate::model::RepaymentInfo;
 
 fn json_of(body: &str, what: &str, path: &str) -> Result<Value, CliError> {
@@ -138,13 +139,18 @@ pub fn payments(body: &str, list_key: &str, path: &str) -> Result<Vec<PaymentRow
     Ok(rows)
 }
 
-/// One published document. Its title is read only to classify it and never kept:
-/// Nelnet's titles embed an identifier (`STMT-<digits>-<date>-…pdf`).
+/// One published document. Its title is read to classify it and to find the year it
+/// names, and is not kept: Nelnet's titles embed an identifier
+/// (`STMT-<digits>-<date>-…pdf`).
 #[derive(Debug, Clone, Default)]
 pub struct DocumentRow {
     pub id: Option<String>,
     pub date: Option<String>,
     pub category: Option<String>,
+    /// The tax year: the one the title names, or else the document date's. The same
+    /// rule as `documents list --tax-year`, because a 1098-E for year N is published
+    /// in year N+1.
+    pub tax_year: Option<u32>,
 }
 
 /// The statement index, newest first, with an undated row last.
@@ -152,12 +158,20 @@ pub fn documents(body: &str, path: &str) -> Result<Vec<DocumentRow>, CliError> {
     let root = json_of(body, "statements", path)?;
     let mut rows: Vec<DocumentRow> = list_at(&root, "statementList", path)?
         .iter()
-        .map(|item| DocumentRow {
-            id: as_text(item, "documentId"),
-            date: as_date(item, "docReceivedDate").or_else(|| as_date(item, "createdDate")),
-            category: letter_type_category(as_text(item, "letterType").as_deref())
-                .or_else(|| as_text(item, "documentTitle").and_then(|t| classify(&t)))
-                .map(str::to_string),
+        .map(|item| {
+            let title = as_text(item, "documentTitle");
+            let date = as_date(item, "docReceivedDate").or_else(|| as_date(item, "createdDate"));
+            DocumentRow {
+                id: as_text(item, "documentId"),
+                category: letter_type_category(as_text(item, "letterType").as_deref())
+                    .or_else(|| title.as_deref().and_then(classify))
+                    .map(str::to_string),
+                tax_year: title
+                    .as_deref()
+                    .and_then(title_year)
+                    .or_else(|| date.as_deref()?.get(..4)?.parse().ok()),
+                date,
+            }
         })
         .collect();
     if !rows.is_empty() && rows.iter().all(|r| r.id.is_none()) {

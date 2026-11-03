@@ -176,7 +176,9 @@ impl Source for LiveSource {
         let deadline = Instant::now() + CALL_BUDGET;
         let _one = hold(&self.one_at_a_time, QUEUE_WAIT).ok_or_else(|| {
             CliError::Upstream(
-                "another call to Nelnet is still running in this server; try again in a minute"
+                "another call to Nelnet is still running in this server, and may be waiting on \
+                 a keychain prompt on this computer; ask the user to check for one, then try \
+                 again"
                     .into(),
             )
         })?;
@@ -514,6 +516,10 @@ pub struct DocumentsArgs {
     /// Only this category: statement, tax or notice.
     #[serde(default)]
     pub category: Option<String>,
+    /// Only documents for this tax year. A 1098-E for a year comes out early the next
+    /// one, so the year is the one the title names, and else the document's date's.
+    #[serde(default)]
+    pub tax_year: Option<u32>,
     /// First day, YYYY-MM-DD. Default: the earliest Nelnet lists.
     #[serde(default)]
     pub since: Option<String>,
@@ -527,6 +533,7 @@ pub struct DocumentsArgs {
 #[derive(Serialize)]
 struct DocumentsFilter<'a> {
     category: Option<&'a str>,
+    tax_year: Option<u32>,
     since: Option<&'a str>,
     until: Option<&'a str>,
 }
@@ -612,7 +619,7 @@ impl<S: Source> Toolset for NelnetTools<S> {
                 "Lists the documents Nelnet has published, newest first, with date, category and \
                  id. Use it to see whether a statement or notice has arrived. It returns no file \
                  contents; the user saves one with `nlnt documents download <id>` in a terminal. \
-                 Narrow with category, since and until.",
+                 Narrow with category, tax_year, since and until.",
             )
             .input::<DocumentsArgs>()
             .output::<DocumentsOut>(),
@@ -812,10 +819,16 @@ impl<S: Source> NelnetTools<S> {
             non_empty(args.until.as_deref()),
         )?;
         let category = non_empty(args.category.as_deref()).map(str::to_ascii_lowercase);
+        if let Some(year) = args.tax_year.filter(|y| !(1998..=2100).contains(y)) {
+            return Err(ToolError::usage(format!(
+                "tax_year must be a year such as 2025, got {year}"
+            )));
+        }
         let page = PageRequest::new(
             &args.list,
             &DocumentsFilter {
                 category: category.as_deref(),
+                tax_year: args.tax_year,
                 since: window.since.as_deref(),
                 until: window.until.as_deref(),
             },
@@ -830,6 +843,7 @@ impl<S: Source> NelnetTools<S> {
         let matched = filter_range(rows, &window, |r| r.date.clone())
             .into_iter()
             .filter(|r| category.is_none() || r.category == category)
+            .filter(|r| args.tax_year.is_none() || r.tax_year == args.tax_year)
             .map(|r| DocumentItem {
                 date: r.date,
                 category: r.category,
@@ -837,7 +851,7 @@ impl<S: Source> NelnetTools<S> {
             })
             .collect();
         ToolOutput::new(&DocumentsOut {
-            page: page.page(matched, "category or since/until")?,
+            page: page.page(matched, "category, tax_year or since/until")?,
         })
     }
 }
