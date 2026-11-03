@@ -67,7 +67,7 @@ the same hazard as a rotating cookie jar.
 ### How the CLI gets the initial bundle
 
 The CLI never replays a password and never drives the identity host's login
-pages. The owner signs in once, in a browser, and the CLI takes the bundle the
+pages. The owner signs in once, in a browser, and the CLI reads the bundle the
 SPA stores. Both ways in below end in the same code: `Session::parse_captured`
 (the bundle, or a bare `Bearer` token), one live read of `/api/1/loan/overview`
 to prove it works, and one keychain item. From then on `auth refresh` (and
@@ -128,11 +128,14 @@ What follows from it:
   the window has opened leaves it in place (a timeout, a closed window, Ctrl-C, a
   refused verifying read, a bundle the parser refuses, a failed keychain write),
   and the error says so and names `nlnt auth logout`. `auth status` reports whether it exists
-  (`browser_profile`), not whether it is signed in, and a profile needing repair is
-  a warning with the field left out.
+  (`browser_profile`), not whether it is signed in. A profile needing repair leaves
+  the field out, with a warning naming the path and the fix, unless `-q`.
 - The verifying read must return data. An empty body, `null`, `{}` or anything else
   that isn't JSON with something in it is exit 5 with nothing stored, since a stale
   session could get one.
+- If a renewal in another process outlasts the lock's wait, `auth logout` exits 5
+  saying the session is deleted but may be stored again, and to wait a minute and
+  rerun.
 - `auth logout` removes the kept profile as its last step, and attempts every step
   even when one fails, or when the config can't be parsed (`--forget` clears that
   file). A failed step, or a sign-in or a Chrome using the profile,
@@ -142,8 +145,8 @@ What follows from it:
 - A captured value the parser refuses is exit 5: the portal changed what it
   stores, which is not a usage mistake. A verifying read the portal refuses is
   exit 3, with nothing stored. A `429` or `5xx` on that read is exit 5, also with
-  nothing stored and no second read; the bundle has already left the page, so a
-  retry takes a new window.
+  nothing stored and no second read; the window is closed and its site storage
+  cleared, so a retry takes a new window.
 - Chrome is found at the standard install paths (Chrome, Chromium, Edge on
   macOS and Linux), or `NLNT_CHROME` names the binary, the same variable
   `scripts/nlnt-capture.mjs` reads. With no Chrome, the error points at the

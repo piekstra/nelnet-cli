@@ -73,7 +73,9 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   The removal refuses while a sign-in or a Chrome is using the profile, or when the
   path is a symlink or another user's. Any failure exits non-zero with the first
   failure's exit code, and the message says what was cleared, what remains and how
-  to finish.
+  to finish. If a renewal in another process outlasts the lock's wait, the session is
+  deleted but may be stored again, so that message says so and to wait a minute and
+  rerun.
 - `auth login --browser --fresh-profile` runs one sign-in in a
   scratch profile instead (`0700`, created exclusively under an unpredictable
   name in the temp dir, removed when the window closes), leaving the kept one

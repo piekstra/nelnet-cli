@@ -57,8 +57,8 @@ nlnt documents download <id> -o ~/Documents/statement.pdf
 
 `auth login --browser` opens Chrome at `https://nelnet.studentaid.gov`. Sign in
 there — username, password and the one-time code go to Nelnet, never through
-`nlnt`. Once the portal has stored its session, `nlnt` takes it out of the page
-and closes the window. Chrome is found at the standard install paths; set
+`nlnt`. Once the portal has stored its session, `nlnt` reads it from the page and
+closes the window. Chrome is found at the standard install paths; set
 `NLNT_CHROME` to use another binary.
 
 The window runs in a Chrome profile `nlnt` **keeps on disk** between sign-ins

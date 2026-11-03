@@ -73,7 +73,7 @@ enum AuthCmd {
     /// the CLI does not replay a password. With `--browser` (the primary path) a
     /// Chrome window opens at https://nelnet.studentaid.gov. Sign in there: the
     /// username, password and one-time code go to Nelnet's own pages, never
-    /// through this CLI. Once the portal has stored its session, `nlnt` takes it
+    /// through this CLI. Once the portal has stored its session, `nlnt` reads it
     /// from the page and closes the window:
     ///
     ///   nlnt auth login --browser
@@ -307,7 +307,11 @@ fn auth(
                     status.session_valid = Some(fresh || session.refresh_token.is_some());
                 }
             }
-            status.browser_profile = browser_profile_status(|| pk_cli_browser::profile_exists(BIN));
+            let (kept, warning) = browser_profile_status(|| pk_cli_browser::profile_exists(BIN));
+            status.browser_profile = kept;
+            if let (Some(warning), false) = (warning, cli.common.quiet) {
+                eprintln!("warning: {warning}");
+            }
             status.emit(cli.common.json);
             Ok(())
         }
@@ -342,17 +346,18 @@ fn auth(
 
 /// `auth status`'s browser field: whether a `--browser` sign-in keeps a profile
 /// here, not whether it is signed in. `auth status` works whatever state the CLI is
-/// in, so a profile that needs repair is a warning on stderr and leaves the field
-/// out. The check is passed in: the binary binds it to `profile_exists(BIN)`, the
+/// in, so a profile that needs repair leaves the field out and returns a warning for
+/// stderr, unless `-q`. The crate's message names the path and the fix; `auth logout`
+/// can't be the fix, since `forget_profile` refuses such a profile too. The check is
+/// passed in: the binary binds it to `profile_exists(BIN)`, the
 /// tests to `profile_exists_in` under a temp dir, so a test never reads the owner's
 /// real data dir.
-fn browser_profile_status(exists: impl FnOnce() -> Result<bool, BrowserError>) -> Option<bool> {
+fn browser_profile_status(
+    exists: impl FnOnce() -> Result<bool, BrowserError>,
+) -> (Option<bool>, Option<String>) {
     match exists() {
-        Ok(kept) => Some(kept),
-        Err(e) => {
-            eprintln!("warning: {e}");
-            None
-        }
+        Ok(kept) => (Some(kept), None),
+        Err(e) => (None, Some(e.to_string())),
     }
 }
 
@@ -407,27 +412,37 @@ fn logout_browser(
 
 /// A caller seeing a failed logout must be able to tell what is gone, what
 /// remains and how to finish. The exit code is the first failure's.
+///
+/// `Upstream` from the session step is the lock's answer: the delete has run, and a
+/// renewal in flight may store the session again. So that session is neither
+/// cleared nor remaining, and the remedy is to wait, not to fix anything. A
+/// `Keychain` error from the same step means the session is still stored.
 fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>) -> CliError {
     let (mut cleared, mut remains, mut reasons) = (Vec::new(), Vec::new(), Vec::new());
     let mut first = None;
     let mut forget_step_failed = false;
+    let mut may_return = false;
     for (index, (name, result)) in steps.into_iter().enumerate() {
         match result {
             Ok(()) => cleared.push(name),
             Err(e) => {
-                remains.push(name);
                 reasons.push(format!("{name}: {}", bare_message(&e)));
-                forget_step_failed |= index > 0;
+                if index == 0 && matches!(e, CliError::Upstream(_)) {
+                    may_return = true;
+                } else {
+                    remains.push(name);
+                    forget_step_failed |= index > 0;
+                }
                 first.get_or_insert(e);
             }
         }
     }
-    let finish = match removal {
+    let profile_finish = match removal {
         Ok(removed) => {
             if removed {
                 cleared.push("the browser profile");
             }
-            "Fix that, then run"
+            None
         }
         Err(e) => {
             let finish = match e {
@@ -437,20 +452,33 @@ fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>
             remains.push("the browser profile");
             reasons.push(format!("the browser profile: {e}"));
             first.get_or_insert(CliError::from(e));
-            finish
+            Some(finish)
         }
     };
-    let cleared = match cleared.as_slice() {
-        [] => "nothing is cleared".to_string(),
-        [one] => format!("{one} is cleared"),
-        many => format!("{} are cleared", and_list(many)),
+    let finish = match (may_return, profile_finish) {
+        (true, None) => "Wait a minute, then run".to_string(),
+        (true, Some(finish)) => format!("Wait a minute. {finish}"),
+        (false, Some(finish)) => finish.to_string(),
+        (false, None) => "Fix that, then run".to_string(),
     };
-    let remains = match remains.as_slice() {
-        [one] => format!("only {one} remains"),
-        many => format!("{} remain", and_list(many)),
-    };
+    let mut clauses = Vec::new();
+    match cleared.as_slice() {
+        [] if may_return => {}
+        [] => clauses.push("nothing is cleared".to_string()),
+        [one] => clauses.push(format!("{one} is cleared")),
+        many => clauses.push(format!("{} are cleared", and_list(many))),
+    }
+    if may_return {
+        clauses.push("the session is deleted, but a renewal in flight may store it again".into());
+    }
+    match remains.as_slice() {
+        [] => {}
+        [one] => clauses.push(format!("only {one} remains")),
+        many => clauses.push(format!("{} remain", and_list(many))),
+    }
     let message = format!(
-        "logout incomplete: {cleared} and {remains} ({}). {finish} `{BIN} auth logout{}` again.",
+        "logout incomplete: {} ({}). {finish} `{BIN} auth logout{}` again.",
+        clauses.join(" and "),
         reasons.join("; "),
         if forget_step_failed { " --forget" } else { "" }
     );
@@ -775,18 +803,20 @@ mod tests {
     fn auth_status_reports_the_kept_browser_profile() {
         let root = tempfile::tempdir().unwrap();
         let exists = || pk_cli_browser::profile_exists_in(root.path(), BIN);
-        assert_eq!(browser_profile_status(exists), Some(false));
+        assert_eq!(browser_profile_status(exists), (Some(false), None));
         let profile = root.path().join("piekstra.nlnt").join("browser-profile");
         std::fs::create_dir_all(profile.join("Default")).unwrap();
-        assert_eq!(browser_profile_status(exists), Some(true));
+        assert_eq!(browser_profile_status(exists), (Some(true), None));
 
         let mut status = AuthStatus::new(true, true, AuthMethod::BrowserSession);
-        status.browser_profile = browser_profile_status(exists);
+        status.browser_profile = browser_profile_status(exists).0;
         assert_eq!(status.to_json()["browser_profile"], true);
 
         let refused = || Err(BrowserError::Profile("needs repair".into()));
-        status.browser_profile = browser_profile_status(refused);
+        let (kept, warning) = browser_profile_status(refused);
+        status.browser_profile = kept;
         assert!(status.to_json().get("browser_profile").is_none());
+        assert!(warning.unwrap().contains("needs repair"));
     }
 
     fn all_cleared() -> Vec<LogoutStep> {
@@ -903,16 +933,30 @@ mod tests {
         assert!(m.contains("`nlnt auth logout --forget` again"), "{m}");
     }
 
-    /// A failure only `Upstream` can carry keeps exit 5, the lock's answer when a
-    /// renewal outlasts its wait, with its prefix once and the profile still removed.
+    /// The crate's own answer when a renewal outlasts the wait, from a lock this
+    /// test holds on a temp path, with a delete that touches no keychain.
+    fn a_renewal_outlasting_the_wait() -> CliError {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token-refresh.lock");
+        RefreshLock::at(&path)
+            .hold(|| {
+                Ok(RefreshLock::at(&path)
+                    .wait_at_most(std::time::Duration::from_millis(1))
+                    .forget(|| Ok(true))
+                    .unwrap_err())
+            })
+            .unwrap()
+    }
+
+    /// `Upstream` from the session step means deleted, but a renewal in flight may
+    /// store it again: neither cleared nor remaining, exit 5 with its prefix once,
+    /// the profile still removed, and the remedy is to wait and rerun.
     #[test]
-    fn an_upstream_failure_keeps_its_exit_code_and_one_prefix() {
+    fn a_renewal_in_flight_is_neither_cleared_nor_remaining() {
+        let upstream = a_renewal_outlasting_the_wait();
+        assert!(matches!(upstream, CliError::Upstream(_)), "{upstream}");
         let mut attempted = false;
-        let steps = vec![(
-            "the session",
-            Err(CliError::Upstream("run this logout again".into())),
-        )];
-        let err = logout_browser(steps, || {
+        let err = logout_browser(vec![("the session", Err(upstream.clone()))], || {
             attempted = true;
             Ok(true)
         })
@@ -925,7 +969,63 @@ mod tests {
             "{m}"
         );
         assert_eq!(m.matches("network/upstream error").count(), 1, "{m}");
-        assert!(m.contains("(the session: run this logout again)"), "{m}");
+        assert!(m.contains(bare_message(&upstream)), "{m}");
+        assert!(
+            m.contains(
+                "the browser profile is cleared and the session is deleted, but a renewal in \
+                 flight may store it again"
+            ),
+            "{m}"
+        );
+        assert!(!m.contains("the session is cleared"), "{m}");
+        assert!(!m.contains("session remains"), "{m}");
+        assert!(!m.contains("Fix that"), "{m}");
+        assert!(
+            m.contains("Wait a minute, then run `nlnt auth logout` again"),
+            "{m}"
+        );
+
+        // No profile to remove: the headline doesn't claim nothing is cleared.
+        let err =
+            logout_browser(vec![("the session", Err(upstream.clone()))], || Ok(false)).unwrap_err();
+        let m = err.to_string();
+        assert!(!m.contains("nothing is cleared"), "{m}");
+        assert!(
+            m.contains("logout incomplete: the session is deleted, but"),
+            "{m}"
+        );
+
+        // A profile in use as well: both remedies, and the profile remains.
+        let err = logout_browser(vec![("the session", Err(upstream))], || {
+            Err(BrowserError::ProfileInUse("a Chrome is in x".into()))
+        })
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 5, "{err}");
+        let m = err.to_string();
+        assert!(m.contains("only the browser profile remains"), "{m}");
+        assert!(
+            m.contains("Wait a minute. Once that window or sign-in is closed, run"),
+            "{m}"
+        );
+    }
+
+    /// `Upstream` only means that from the session step. Elsewhere it is an ordinary
+    /// failure, and `Keychain` from the session step means it is still stored.
+    #[test]
+    fn only_the_session_steps_upstream_is_a_renewal_in_flight() {
+        let steps = vec![
+            ("the session", Ok(())),
+            ("the saved settings", Err(CliError::Upstream("x".into()))),
+        ];
+        let m = logout_browser(steps, || Ok(false)).unwrap_err().to_string();
+        assert!(m.contains("only the saved settings remains"), "{m}");
+        assert!(!m.contains("renewal"), "{m}");
+
+        let steps = vec![("the session", Err(CliError::Keychain("denied".into())))];
+        let m = logout_browser(steps, || Ok(false)).unwrap_err().to_string();
+        assert!(m.contains("only the session remains"), "{m}");
+        assert!(!m.contains("renewal"), "{m}");
+        assert!(m.contains("Fix that, then run"), "{m}");
     }
 
     /// No prefix leads the report or repeats inside it, whichever variants the
