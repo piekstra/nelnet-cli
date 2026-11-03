@@ -24,7 +24,7 @@ profile (v0.16.0).
 - `nlnt auth login --browser --fresh-profile` signs in once through a scratch
   profile, deleted afterwards, leaving the kept one alone. A failed login's
   retry command repeats the flag.
-- `nlnt auth logout` also removes the kept profile, as its last step. While a
-  sign-in or a Chrome window is using the profile, or when it needs repair, it
-  exits 1, and the message says the session (and, with `--forget`, the saved
-  settings) is already cleared, that only the profile remains and how to finish.
+- `nlnt auth logout` also removes the kept profile, as its last step. It attempts
+  every step even when one fails. If one fails, or a sign-in or a Chrome window is
+  using the profile, it exits with the first failure's code, and the message says
+  what was cleared, what remains and how to finish.

@@ -62,10 +62,12 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   config, so it does not show the profile.
 - **`auth logout` removes the kept profile**, that directory and nothing else, as
   its last step; it clears the stored session too, and there is no way to remove
-  the profile alone. It refuses while a sign-in or a Chrome is using the profile,
-  or when the path is a symlink or another user's. A refusal is exit 1, and its
-  message says the session (and, with `--forget`, the saved settings) is already
-  cleared, that only the profile remains and how to finish.
+  the profile alone. Every step is attempted even when an earlier one fails, so a
+  denied keychain prompt or an unwritable config does not leave the profile behind.
+  The removal refuses while a sign-in or a Chrome is using the profile, or when the
+  path is a symlink or another user's. Any failure exits non-zero with the first
+  failure's exit code, and the message says what was cleared, what remains and how
+  to finish.
 - `auth login --browser --fresh-profile` runs one sign-in in a
   scratch profile instead (`0700`, created exclusively under an unpredictable
   name in the temp dir, removed when the window closes), leaving the kept one

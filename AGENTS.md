@@ -122,8 +122,8 @@ cannot spend a code or lock the account. Still:
   (SECURITY.md lists its contents). Every browser sign-in goes through
   `browser::sign_in`, including the step that parses, verifies and stores the
   session, so any failure after the window opens names the profile
-  (`failed_sign_in`). A refused removal names what logout
-  already cleared (`refused_profile_removal`). `auth status` cannot report it
+  (`failed_sign_in`). Logout attempts every step, keychain first and profile last,
+  then names what was cleared and what remains (`incomplete_logout`). `auth status` cannot report it
   until `pk-cli-browser` can say whether it exists; don't recompute its path here.
 - `with_reauth` retries **once** and never loops. The recovery step is
   `client::refresh_or_relogin`: exchange the refresh token, and only if that is

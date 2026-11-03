@@ -83,9 +83,9 @@ you view loan or statement pages in that window.**
 The profile stays after a failed sign-in too, possibly with a live session, and
 the error says so. `nlnt auth status` reads only the keychain and config, so it does
 not show the profile. `nlnt auth logout` removes it and clears the stored session with it.
-While a sign-in or a Chrome window is using the profile, logout clears the
-session, exits 1 and says only the profile remains; close the window and run it
-again.
+It attempts every step even when one fails. If one fails, or a sign-in or a Chrome
+window is using the profile, it exits non-zero and says what was cleared, what
+remains and how to finish.
 
 The session carries a refresh token, so this is a **one-time sign-in**: `nlnt`
 renews the short-lived access token itself (`nlnt auth refresh`, or

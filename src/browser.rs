@@ -153,18 +153,22 @@ fn failed_sign_in(error: BrowserError, fresh_profile: bool) -> CliError {
     if fresh_profile || refused_before_the_window {
         return cli_error;
     }
-    let noted = |m: String| {
+    map_message(cli_error, |m| {
         let stop = if m.ends_with('.') { " " } else { ". " };
         format!("{m}{stop}{PROFILE_STAYS}")
-    };
-    match cli_error {
-        CliError::Usage(m) => CliError::Usage(noted(m)),
-        CliError::Auth(m) => CliError::Auth(noted(m)),
-        CliError::NotFound(m) => CliError::NotFound(noted(m)),
-        CliError::Upstream(m) => CliError::Upstream(noted(m)),
-        CliError::ConfirmationRequired(m) => CliError::ConfirmationRequired(noted(m)),
-        CliError::Keychain(m) => CliError::Keychain(noted(m)),
-        CliError::Other(m) => CliError::Other(noted(m)),
+    })
+}
+
+/// The same error, so the same exit code, with its message rewritten.
+pub fn map_message(error: CliError, rewrite: impl FnOnce(String) -> String) -> CliError {
+    match error {
+        CliError::Usage(m) => CliError::Usage(rewrite(m)),
+        CliError::Auth(m) => CliError::Auth(rewrite(m)),
+        CliError::NotFound(m) => CliError::NotFound(rewrite(m)),
+        CliError::Upstream(m) => CliError::Upstream(rewrite(m)),
+        CliError::ConfirmationRequired(m) => CliError::ConfirmationRequired(rewrite(m)),
+        CliError::Keychain(m) => CliError::Keychain(rewrite(m)),
+        CliError::Other(m) => CliError::Other(rewrite(m)),
     }
 }
 

@@ -271,13 +271,22 @@ fn login_help_leads_with_the_browser() {
 }
 
 #[test]
-fn logout_help_says_a_refusal_leaves_only_the_profile() {
+fn logout_keeps_a_one_line_summary_and_the_detail_in_the_long_help() {
     let out = nlnt().args(["auth", "logout", "--help"]).assert().success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
     assert!(
-        stdout.contains("1 with the rest already cleared"),
+        stdout.contains("what was cleared, what remains"),
         "{stdout}"
     );
+    for args in [&["auth", "--help"][..], &["auth", "logout", "-h"][..]] {
+        let out = nlnt().args(args).assert().success();
+        let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+        assert!(
+            stdout.contains("remove the kept browser profile"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("what remains"), "{stdout}");
+    }
 }
 
 /// `--fresh-profile` chooses the browser's profile, so it means nothing without

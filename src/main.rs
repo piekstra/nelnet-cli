@@ -108,9 +108,11 @@ enum AuthCmd {
     Refresh(RefreshArgs),
     /// Report credential and session state (auth-status/v1).
     Status,
-    /// Clear the cached session, then remove the kept browser profile; --forget
-    /// also clears saved settings. While Chrome is using the profile this exits
-    /// 1 with the rest already cleared and only the profile left.
+    /// Clear the session and remove the kept browser profile; --forget also clears saved settings.
+    ///
+    /// Every step is attempted, so one failing does not stop the rest. If a step
+    /// fails, or a sign-in or a Chrome window is using the profile, this exits
+    /// non-zero and says what was cleared, what remains and how to finish.
     Logout(LogoutArgs),
     /// Write a session bundle to the keychain (rotation / scripted setup).
     ///
@@ -279,12 +281,14 @@ fn auth(
             Ok(())
         }
         AuthCmd::Logout(args) => {
-            creds.delete(SESSION_ACCOUNT)?;
+            // Every step runs whatever the one before it did: the steps come
+            // first and the profile last, and `logout_browser` reports each.
+            let mut steps: Vec<LogoutStep> =
+                vec![("the session", creds.delete(SESSION_ACCOUNT).map(drop))];
             if args.forget {
-                store.clear()?;
+                steps.push(("the saved settings", store.clear().map(drop)));
             }
-            // Last, so a refusal (its window still open) leaves the rest done.
-            let line = logout_browser(args.forget, || pk_cli_browser::forget_profile(BIN))?;
+            let line = logout_browser(steps, || pk_cli_browser::forget_profile(BIN))?;
             if !cli.common.quiet {
                 eprintln!("{line}");
             }
@@ -314,44 +318,94 @@ fn auth(
     }
 }
 
-/// `auth logout`'s browser step. The profile `auth login --browser` keeps holds
-/// the identity host's cookies (its remembered device and session) and the rest
-/// of a Chrome profile, so a logout removes it too and the next sign-in starts
-/// signed out. The removal is passed in: the binary binds it to
-/// `forget_profile(BIN)`, the tests to `forget_profile_in` under a temp dir, so
-/// a test never removes the owner's real profile. Returns the status line.
+/// What a logout step clears, and how it went.
+type LogoutStep = (&'static str, Result<(), CliError>);
+
+/// `auth logout`'s last step, and its report. The profile `auth login --browser`
+/// keeps holds the identity host's cookies (its remembered device and session) and
+/// the rest of a Chrome profile, so a logout removes it too and the next sign-in
+/// starts signed out, even when an earlier step failed. The removal is passed in:
+/// the binary binds it to `forget_profile(BIN)`, the tests to `forget_profile_in`
+/// under a temp dir, so a test never removes the owner's real profile. Returns the
+/// status line.
 fn logout_browser(
-    forget: bool,
+    steps: Vec<LogoutStep>,
     remove_profile: impl FnOnce() -> Result<bool, BrowserError>,
 ) -> Result<String, CliError> {
-    let removed = remove_profile().map_err(|e| refused_profile_removal(e, forget))?;
-    Ok(format!(
-        "logged out{}",
-        if removed {
-            "; browser profile removed"
-        } else {
-            ""
-        }
-    ))
+    match remove_profile() {
+        Ok(removed) if steps.iter().all(|(_, result)| result.is_ok()) => Ok(format!(
+            "logged out{}",
+            if removed {
+                "; browser profile removed"
+            } else {
+                ""
+            }
+        )),
+        removal => Err(incomplete_logout(steps, removal)),
+    }
 }
 
-/// The browser step runs last, so when it is refused the rest of the logout is
-/// already done. A caller seeing exit 1 must be able to tell that the session is
-/// gone, and what is left to do.
-fn refused_profile_removal(error: BrowserError, forget: bool) -> CliError {
-    let cleared = if forget {
-        "the session and the saved settings are cleared"
-    } else {
-        "the session is cleared"
+/// A caller seeing a failed logout must be able to tell what is gone, what
+/// remains and how to finish. The exit code is the first failure's.
+fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>) -> CliError {
+    let (mut cleared, mut remains, mut reasons) = (Vec::new(), Vec::new(), Vec::new());
+    let mut first = None;
+    let mut forget_step_failed = false;
+    for (index, (name, result)) in steps.into_iter().enumerate() {
+        match result {
+            Ok(()) => cleared.push(name),
+            Err(e) => {
+                remains.push(name);
+                reasons.push(e.to_string());
+                forget_step_failed |= index > 0;
+                first.get_or_insert(e);
+            }
+        }
+    }
+    let finish = match removal {
+        Ok(removed) => {
+            if removed {
+                cleared.push("the browser profile");
+            }
+            "Fix that, then run"
+        }
+        Err(e) => {
+            let finish = match e {
+                BrowserError::ProfileInUse(_) => "Once that window or sign-in is closed, run",
+                _ => "Repair or delete that path, then run",
+            };
+            remains.push("the browser profile");
+            reasons.push(e.to_string());
+            first.get_or_insert(CliError::from(e));
+            finish
+        }
     };
-    let finish = match error {
-        BrowserError::ProfileInUse(_) => "Once that window or sign-in is closed, run",
-        _ => "Repair or delete that path, then run",
+    let cleared = match cleared.as_slice() {
+        [] => "nothing is cleared".to_string(),
+        [one] => format!("{one} is cleared"),
+        many => format!("{} are cleared", and_list(many)),
     };
-    CliError::Other(format!(
-        "partly logged out: {cleared} and only the browser profile remains. {error}. {finish} \
-         `{BIN} auth logout` again to remove it."
-    ))
+    let remains = match remains.as_slice() {
+        [one] => format!("only {one} remains"),
+        many => format!("{} remain", and_list(many)),
+    };
+    let message = format!(
+        "logout incomplete: {cleared} and {remains}. {}. {finish} `{BIN} auth logout{}` again.",
+        reasons.join(". "),
+        if forget_step_failed { " --forget" } else { "" }
+    );
+    match first {
+        Some(error) => nlnt::browser::map_message(error, |_| message),
+        None => CliError::Other(message),
+    }
+}
+
+fn and_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Refuse a flag combination `--browser` cannot honor. Runs before anything
@@ -621,7 +675,11 @@ mod tests {
         }
     }
 
-    /// The logout's browser step on a temp dir through `test-util`'s
+    fn all_cleared() -> Vec<LogoutStep> {
+        vec![("the session", Ok(()))]
+    }
+
+    /// The logout's profile step on a temp dir through `test-util`'s
     /// `forget_profile_in`, so the test never reaches the owner's real profile.
     #[test]
     fn logout_removes_the_kept_browser_profile() {
@@ -630,12 +688,12 @@ mod tests {
         std::fs::create_dir_all(profile.join("Default")).unwrap();
         let remove = || pk_cli_browser::forget_profile_in(root.path(), BIN);
         assert_eq!(
-            logout_browser(false, remove).unwrap(),
+            logout_browser(all_cleared(), remove).unwrap(),
             "logged out; browser profile removed"
         );
         assert!(!profile.exists());
         // No profile left: nothing to remove, and not an error.
-        assert_eq!(logout_browser(false, remove).unwrap(), "logged out");
+        assert_eq!(logout_browser(all_cleared(), remove).unwrap(), "logged out");
     }
 
     /// A profile in use or needing repair is exit 1, and the message says what
@@ -644,29 +702,31 @@ mod tests {
     fn a_refused_profile_removal_says_what_is_already_cleared() {
         let in_use = || BrowserError::ProfileInUse("a Chrome (pid 7) is in x".into());
         let repair = || BrowserError::Profile("the browser profile dir x is a symlink".into());
+        let forgotten =
+            || -> Vec<LogoutStep> { vec![("the session", Ok(())), ("the saved settings", Ok(()))] };
         let cases = [
             (
                 in_use(),
-                false,
+                all_cleared(),
                 "the session is cleared",
                 "window or sign-in",
             ),
             (
                 in_use(),
-                true,
+                forgotten(),
                 "the session and the saved settings are cleared",
                 "window or sign-in",
             ),
             (
                 repair(),
-                false,
+                all_cleared(),
                 "the session is cleared",
                 "Repair or delete",
             ),
         ];
-        for (refusal, forget, cleared, finish) in cases {
+        for (refusal, steps, cleared, finish) in cases {
             let shown = refusal.to_string();
-            let err = logout_browser(forget, || Err(refusal)).unwrap_err();
+            let err = logout_browser(steps, || Err(refusal)).unwrap_err();
             assert_eq!(err.exit_code(), 1, "{err}");
             let m = err.to_string();
             assert!(m.contains(cleared), "{m}");
@@ -675,6 +735,58 @@ mod tests {
             assert!(m.contains(finish), "{m}");
             assert!(m.contains("`nlnt auth logout` again"), "{m}");
         }
+    }
+
+    /// A failed keychain step does not stop the rest: the profile is really
+    /// removed, on a temp dir, and the report says what went and what stayed.
+    #[test]
+    fn a_failed_step_does_not_stop_the_profile_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("piekstra.nlnt").join("browser-profile");
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        let steps = vec![("the session", Err(CliError::Keychain("denied".into())))];
+        let err = logout_browser(steps, || {
+            pk_cli_browser::forget_profile_in(root.path(), BIN)
+        })
+        .unwrap_err();
+        assert!(!profile.exists());
+        assert_eq!(err.exit_code(), 1, "{err}");
+        let m = err.to_string();
+        assert!(m.contains("the browser profile is cleared"), "{m}");
+        assert!(m.contains("only the session remains"), "{m}");
+        assert!(m.contains("denied"), "{m}");
+        assert!(m.contains("`nlnt auth logout` again"), "{m}");
+    }
+
+    /// Every step is attempted, the exit code is the first failure's, and a
+    /// failed `--forget` step is why the retry names `--forget`.
+    #[test]
+    fn every_failure_is_reported_with_the_first_exit_code() {
+        let mut attempted = false;
+        let steps = vec![
+            ("the session", Ok(())),
+            (
+                "the saved settings",
+                Err(CliError::Upstream("first".into())),
+            ),
+        ];
+        let err = logout_browser(steps, || {
+            attempted = true;
+            Err(BrowserError::ProfileInUse("second".into()))
+        })
+        .unwrap_err();
+        assert!(attempted);
+        assert_eq!(err.exit_code(), 5, "{err}");
+        let m = err.to_string();
+        assert!(m.contains("the session is cleared"), "{m}");
+        assert!(
+            m.contains("the saved settings and the browser profile remain"),
+            "{m}"
+        );
+        for reason in ["first", "second"] {
+            assert!(m.contains(reason), "{m}");
+        }
+        assert!(m.contains("`nlnt auth logout --forget` again"), "{m}");
     }
 
     /// A captured value the parser refuses is the portal's shape changing
