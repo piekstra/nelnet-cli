@@ -440,7 +440,8 @@ hazard are gone.)
 ## Writes — catalogued, not implemented
 
 `nlnt` is read-only. **No Nelnet write endpoint has been mapped, called, or
-implemented**, and `nlnt api` refuses any method but GET with exit 6. On a
+implemented**, `nlnt api` refuses any method but GET with exit 6, and `nlnt mcp`'s
+tools read only the paths in `client::paths`. On a
 federal student loan the write surface (make a payment, change autopay, change a
 repayment plan, submit IDR recertification) moves real money and affects loan
 terms. Anything implementing one must confirm its contract against live traffic

@@ -102,7 +102,9 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   through. `docs/api.md` § Unattended re-login says how to find and stop it.
 - **Secrets live only in the macOS keychain**, service `piekstra.nlnt`. Never a
   dotfile, never the config file (`~/.config/nlnt/config.json`), never an
-  environment variable written to disk. `~/.config/nlnt/token-refresh.lock` is an
+  environment variable written to disk. The bearer token of `nlnt mcp --http` is
+  there too (account `mcp-http-token`), or in `$NLNT_MCP_TOKEN`; see
+  [The MCP server](#the-mcp-server). `~/.config/nlnt/token-refresh.lock` is an
   empty file that `nlnt` processes hold while renewing the session, so two never
   present one rotating refresh token once all are 0.1.2 or later.
   `token-capture.lock` beside it keeps two capture commands from running at once.
@@ -137,10 +139,51 @@ spend a code or lock the account. The test suite is nonetheless **fully
 offline** — no test, CI job, or lint has ever contacted the provider. Do not add
 one.
 
+## The MCP server
+
+`nlnt mcp` serves five read-only tools to an MCP client (Claude Code, Claude Desktop)
+over stdio; the server opens no port unless run with `--http` (below). **What the tools
+return goes to Claude on every path**, as part of your conversation: balances, accrued
+interest, loan types and rates, payments and their split, the repayment plan and next
+payment, autopay enrollment and the bank's name, income-driven applications, the 1098-E
+figure, and documents' dates and categories, with the school's name in detailed format.
+No tool returns an account number, a bank account's digits, a routing number, an SSN, a
+name, an address, or a document's title, which embeds an identifier.
+
+No tool can make a payment or change anything at Nelnet. A tool reaches Nelnet only
+through a seam with `get_text` and nothing else, and asks for `&'static str` paths, so
+what a model passes cannot name another endpoint, even for a read. `--allow-writes` adds
+nothing, since every tool is read-only. `src/mcp/tests.rs` holds this to the requests
+the tools send.
+
+**A tool never signs in.** `tools/list` touches no credential and no file. A call reads
+the config and the `session` keychain item afresh, and renews with the stored refresh
+token under `token-refresh.lock`, the lock every other `nlnt` holds, so two running
+copies never present one rotating token. A tool does not run `refresh_command`, even
+where one is configured: it drives a browser and may spend a one-time code, and a model
+must not be able to start that. A dead session is an error naming the command for a
+person to run. On macOS a call can raise a keychain prompt; a server left unattended
+waits on it.
+
+**`nlnt mcp --http`** is the path for Claude on the web and mobile. It binds 127.0.0.1
+only, and is reached through a Cloudflare Tunnel and a Worker in your own account,
+deployed from [cli-common's `connector/`](https://github.com/piekstra/cli-common/tree/main/connector),
+whose README has the threat model. It refuses to start without a bearer token of at
+least 32 bytes, from `$NLNT_MCP_TOKEN` or the keychain item `mcp-http-token`, and refuses
+any request without it, whose `Host` is not loopback, or that carries an `Origin`. The
+Nelnet session never leaves your computer, but on this path tool results also cross
+Cloudflare on their way to Claude, in plaintext to your Worker. Anyone holding the bearer
+token and able to reach the port can read everything the tools return, and cannot do
+more. Rotate it with `nlnt mcp --new-token`, then update `HOME_NELNET_TOKEN`.
+
+A call waits at most 45 seconds for the call before it and stops asking Nelnet after 110,
+so a call the client has stopped waiting for ends. Nothing is cached between calls, and
+results are not logged.
+
 ## Threat model, briefly
 
 The realistic risks are (1) a credential leaking into git history or a log, and
 (2) a downloaded tax form being committed. Both are addressed above. This tool
-is **read-only** against the provider: it holds no payment surface, so a bug
-cannot move money. That claim must change in the same commit as the first write
+is **read-only** against the provider, `nlnt mcp` included: it holds no payment
+surface, so a bug cannot move money. That claim must change in the same commit as the first write
 operation.

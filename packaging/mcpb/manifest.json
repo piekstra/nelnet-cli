@@ -1,0 +1,81 @@
+{
+  "manifest_version": "0.3",
+  "name": "nlnt",
+  "display_name": "Nelnet (nlnt)",
+  "version": "0.3.0",
+  "description": "Read-only access to your own Nelnet student-loan balances, payments, repayment status and 1098-E interest, through the open-source nlnt CLI.",
+  "long_description": "Ask Claude about your federal student loans at Nelnet: what is owed and how much interest has accrued, what was paid and how it split between principal and interest, what is due next, and the interest figure for your 1098-E. Five read-only tools: nelnet_loans, nelnet_payments, nelnet_repayment, nelnet_tax and nelnet_documents. Nothing can make or schedule a payment, change autopay or a repayment plan, or change anything at Nelnet. The extension asks for no password: first install the nlnt CLI and run `nlnt auth login --browser` in a terminal, which signs you in on Nelnet's own pages and stores the session in your OS keychain. The bundled nlnt reads it from there and renews it in place. When a session ends, the tools say so; run `nlnt auth login --browser --overwrite` again. What the tools return goes to Claude as part of your conversation. On macOS the first call asks for keychain access; choose Always Allow. Unofficial; not affiliated with Nelnet.",
+  "author": {
+    "name": "piekstra",
+    "url": "https://github.com/piekstra"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/piekstra/nelnet-cli"
+  },
+  "homepage": "https://github.com/piekstra/nelnet-cli",
+  "documentation": "https://github.com/piekstra/nelnet-cli#use-with-claude",
+  "support": "https://github.com/piekstra/nelnet-cli/issues",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "nelnet",
+    "student-loans",
+    "loans",
+    "finance",
+    "read-only"
+  ],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/nlnt",
+    "mcp_config": {
+      "command": "${__dirname}/server/nlnt",
+      "args": [
+        "mcp"
+      ],
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/server/nlnt.exe",
+          "args": [
+            "mcp"
+          ]
+        },
+        "linux": {
+          "command": "${__dirname}/server/linux/nlnt",
+          "args": [
+            "mcp"
+          ]
+        }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "nelnet_loans",
+      "description": "What is owed: total principal, accrued interest and payoff, and each loan group."
+    },
+    {
+      "name": "nelnet_payments",
+      "description": "Payments over a date range, posted or scheduled, with their principal and interest split."
+    },
+    {
+      "name": "nelnet_repayment",
+      "description": "Repayment status, plan, next payment, recertification date, autopay and income-driven applications."
+    },
+    {
+      "name": "nelnet_tax",
+      "description": "The student-loan interest Nelnet reports for the 1098-E, as a running total."
+    },
+    {
+      "name": "nelnet_documents",
+      "description": "The documents Nelnet has published, by date and category."
+    }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  }
+}

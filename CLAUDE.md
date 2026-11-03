@@ -15,9 +15,10 @@ Five things that bite hardest here:
    defaulting the missing figure to zero — a fabricated `$0.00` accrued interest
    reads as good news in the very workflow this CLI exists for. Watch the
    `currentBalance` inversion between `/loan/overview` and a loan group.
-4. **Read-only is enforced in three places that must stay in agreement**: the
-   `api` non-GET guard (exit 6), the absence of any write command, and the
-   claims in README/AGENTS/SECURITY. Change them together or not at all.
+4. **Read-only is enforced in four places that must stay in agreement**: the
+   `api` non-GET guard (exit 6), the absence of any write command, `nlnt mcp`'s
+   read-only tools, and the claims in README/AGENTS/SECURITY. Change them together
+   or not at all.
 5. **Auth is OAuth2 Bearer behind Akamai.** `client::sentinel_headers` is what
    passes the bot wall; an Akamai-denial 403 is upstream (5), not auth (3).
    Refresh tokens rotate — persist the new bundle. The `%PDF-` check in

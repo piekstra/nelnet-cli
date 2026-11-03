@@ -47,6 +47,18 @@ const CHROME_MAJOR: &str = "151";
 /// request: `client_id=mma`, PKCE S256, `nds_client_id=1` (federal).
 pub const OAUTH_CLIENT_ID: &str = "mma";
 
+/// How a stored session that does not parse is reported.
+pub const SESSION_UNREADABLE: &str = "stored session is unreadable";
+
+/// How a dead refresh token words its way out, which a tool replaces with its own.
+pub const SIGN_IN_AGAIN: &str = " — sign in again with";
+
+/// A session stored without a refresh token.
+pub const NO_REFRESH_TOKEN: &str = "the stored session has no refresh token";
+
+/// The identity host's answer to a refresh token that has expired or was used.
+pub const REFRESH_REJECTED: &str = "the refresh token was rejected (expired or already used)";
+
 /// Portal API paths. CONFIRMED-LIVE 2026-08-12 by observing the SPA's own XHRs
 /// and replaying each against `mmaapi.nelnet.studentaid.gov`.
 pub mod paths {
@@ -206,7 +218,7 @@ impl Session {
             CliError::Auth("no stored session — run `nlnt auth login --browser`".into())
         })?;
         serde_json::from_str(raw.expose())
-            .map_err(|e| CliError::Other(format!("stored session is unreadable: {e}")))
+            .map_err(|e| CliError::Other(format!("{SESSION_UNREADABLE}: {e}")))
     }
 
     fn store(&self, creds: &CredentialStore) -> Result<(), CliError> {
@@ -308,7 +320,7 @@ impl Portal {
             .header("Authorization", self.bearer())
             .header("Accept", "application/json, text/plain, */*")
             .send()
-            .map_err(|e| CliError::Upstream(format!("GET {path} failed: {e}")))?;
+            .map_err(|e| CliError::Upstream(format!("GET {path} failed: {}", e.without_url())))?;
         let status = resp.status().as_u16();
         let content_type = resp
             .headers()
@@ -338,7 +350,7 @@ impl Portal {
             .header("Authorization", self.bearer())
             .header("Accept", "application/pdf,*/*")
             .send()
-            .map_err(|e| CliError::Upstream(format!("GET {path} failed: {e}")))?;
+            .map_err(|e| CliError::Upstream(format!("GET {path} failed: {}", e.without_url())))?;
 
         let status = resp.status().as_u16();
         // An auth/bot/not-found status never carries a PDF; classify it through
@@ -376,11 +388,9 @@ impl Portal {
     /// old one in the keychain. Returns the refreshed session.
     pub fn refresh(&self, cfg: &Config, creds: &CredentialStore) -> Result<Session, CliError> {
         let refresh_token = self.session.refresh_token.as_deref().ok_or_else(|| {
-            CliError::Auth(
-                "the stored session has no refresh token — sign in again with \
-                 `nlnt auth login --browser --overwrite`"
-                    .into(),
-            )
+            CliError::Auth(format!(
+                "{NO_REFRESH_TOKEN}{SIGN_IN_AGAIN} `nlnt auth login --browser --overwrite`"
+            ))
         })?;
         let url = format!(
             "{}{}",
@@ -402,7 +412,9 @@ impl Portal {
                 ("refresh_token", refresh_token),
             ])
             .send()
-            .map_err(|e| CliError::Upstream(format!("token refresh failed: {e}")))?;
+            .map_err(|e| {
+                CliError::Upstream(format!("token refresh failed: {}", e.without_url()))
+            })?;
 
         let status = resp.status().as_u16();
         let body = resp
@@ -413,11 +425,9 @@ impl Portal {
         }
         if status == 400 || status == 401 {
             // invalid_grant: the refresh token expired or was already rotated.
-            return Err(CliError::Auth(
-                "the refresh token was rejected (expired or already used) — sign in again \
-                 with `nlnt auth login --browser --overwrite`"
-                    .into(),
-            ));
+            return Err(CliError::Auth(format!(
+                "{REFRESH_REJECTED}{SIGN_IN_AGAIN} `nlnt auth login --browser --overwrite`"
+            )));
         }
         if !(200..300).contains(&status) {
             return Err(CliError::Upstream(format!(

@@ -29,6 +29,7 @@ const COMMANDS: &[&str] = &[
     "tax",
     "documents",
     "api",
+    "mcp",
     "self-update",
     "completions",
     "info",

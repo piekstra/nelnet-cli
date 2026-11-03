@@ -16,6 +16,7 @@ use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
 use nlnt::client::{self, Session};
 use nlnt::commands::{autopay, documents, loans, repayment, summary, tax, transactions, Ctx};
 use nlnt::config::{Config, SESSION_ACCOUNT};
+use nlnt::mcp::{LiveSource, NelnetTools};
 use nlnt::{BIN, REPO};
 
 /// Nelnet student-loan servicing from the command line — balances, accrued
@@ -57,6 +58,13 @@ enum Command {
     Documents(documents::Cmd),
     /// Raw portal passthrough (read-only: GET requests only).
     Api(ApiArgs),
+    /// Serve read-only Nelnet tools to Claude over MCP (stdio, or --http).
+    ///
+    /// For Claude Code (`claude mcp add nelnet -- nlnt mcp`), Claude Desktop and any
+    /// MCP client. With --http, on 127.0.0.1 behind a bearer token, for your own
+    /// Cloudflare Worker (see README). No tool can make a payment or change
+    /// anything at Nelnet, and no tool signs in.
+    Mcp(pk_cli_mcp::McpArgs),
     /// Update to the latest release from GitHub.
     SelfUpdate(SelfUpdateArgs),
     /// Print a shell completion script.
@@ -170,6 +178,12 @@ fn main() {
 fn run(cli: &Cli) -> Result<(), CliError> {
     let store = ConfigStore::new(BIN);
     let creds = CredentialStore::for_binary(BIN);
+    // Before anything reads the config: listing the tools reads no file, and a
+    // running server reads it on each call, so a later `config set` applies and a
+    // malformed file is one tool's error rather than no server.
+    if let Command::Mcp(args) = &cli.command {
+        return pk_cli_mcp::run(args, NelnetTools::new(LiveSource::new(creds)));
+    }
     dispatch(cli, &store, &creds, &|store, forget| {
         run_logout(
             &cli.common,
@@ -216,13 +230,19 @@ fn dispatch(
         Command::Tax => with_ctx(&|ctx| tax::run(ctx)),
         Command::Documents(cmd) => with_ctx(&|ctx| documents::run(ctx, cmd)),
         Command::Api(args) => with_ctx(&|ctx| api(ctx, args)),
+        Command::Mcp(_) => unreachable!("served before dispatch"),
         Command::SelfUpdate(args) => Updater {
             repo: REPO.into(),
             binary: BIN.into(),
             target: env!("BUILD_TARGET").into(),
             current: env!("CARGO_PKG_VERSION").into(),
         }
-        .run(args, cli.common.json, cli.common.quiet),
+        .run_noting(
+            args,
+            cli.common.json,
+            cli.common.quiet,
+            &pk_cli_mcp::restart_note(BIN),
+        ),
         Command::Completions { shell } => {
             clap_complete::generate(*shell, &mut Cli::command(), BIN, &mut std::io::stdout());
             Ok(())
@@ -246,6 +266,7 @@ fn dispatch(
                     "tax",
                     "documents",
                     "api",
+                    "mcp",
                 ],
             )
             .with_profiles(&[pk_cli_documents::PROFILE]);

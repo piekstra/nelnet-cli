@@ -58,6 +58,7 @@ smoke: build
 	$$B loans --help >/dev/null; \
 	$$B transactions --help >/dev/null; \
 	$$B documents --help >/dev/null; \
+	$$B mcp --list-tools >/dev/null; \
 	$$B auth --help >/dev/null; \
 	$$B auth login --help >/dev/null; \
 	$$B config --help >/dev/null; \
