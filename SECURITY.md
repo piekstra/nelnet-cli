@@ -29,7 +29,9 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   dotfile, never the config file (`~/.config/nlnt/config.json`), never an
   environment variable written to disk. `~/.config/nlnt/token-refresh.lock` is an
   empty file that `nlnt` processes hold while renewing the session, so two never
-  present one rotating refresh token. It holds nothing.
+  present one rotating refresh token once all are 0.1.2 or later.
+  `token-capture.lock` beside it keeps two capture commands from running at once.
+  Neither holds anything.
 - **The OAuth token bundle is the secret.** The access token *and* the refresh
   token are stored in the keychain under the same service and are never logged,
   never printed by `--verbose`, and never written to a fixture. A refresh token

@@ -118,14 +118,19 @@ cannot spend a code or lock the account. Still:
   presenting an already-rotated token revokes the whole family. So the CLI must
   be the sole holder of a captured bundle — don't refresh concurrently against a
   live browser session on the same account. See `docs/api.md` § Token lifetimes.
-  Two `nlnt` processes cannot race each other: `client::refresh_or_relogin` runs
-  under `pk_cli_auth::refresh_lock::RefreshLock`
+  Two `nlnt` processes cannot race each other: `client::refresh_or_relogin` posts
+  its grant under `pk_cli_auth::refresh_lock::RefreshLock`
   (`~/.config/nlnt/token-refresh.lock`, holding nothing), re-reads the session
   once it holds the lock, and posts no grant if the stored refresh token changed.
-  A login and a logout hold it around their keychain write only, never across
-  the sign-in. The capture command is part of a renewal, so it does run under
-  the lock: a second process must not start its own and burn another code. The
-  lock is not reentrant, so `relogin_via_command` stores directly.
+  A login and a logout hold it around their keychain write only, never across the
+  sign-in: `before_signin` first, `store_signin` for the write, and a logout's
+  delete runs with or without it (`forget_for_binary`).
+- **One capture at a time.** The capture command can spend a one-time code, so
+  `capture_once` runs it under a second empty file, `token-capture.lock`, outside
+  the refresh lock so a login or logout never waits on a capture. A process that
+  finds it held waits, uses what that capture stored, and if nothing was stored
+  fails rather than spending another code. A capture is stopped after 5 minutes,
+  and a sign-in's or logout's result stands over a capture that finishes later.
 - The unattended full-login path burns a real MFA code; the capture script
   prefers silent renewal (persistent profile) precisely to avoid that.
 

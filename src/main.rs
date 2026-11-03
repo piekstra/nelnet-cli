@@ -275,9 +275,10 @@ fn auth(
             Ok(())
         }
         AuthCmd::Logout(args) => {
-            // Under the lock a renewal holds, so one in flight cannot store the
-            // session again after the logout.
-            RefreshLock::for_binary(BIN)?.hold(|| creds.delete(SESSION_ACCOUNT))?;
+            // Under the lock a renewal holds if it can be had, so one in flight
+            // cannot store the session again after the logout. The delete runs
+            // either way: the lock must not keep a credential on the machine.
+            RefreshLock::forget_for_binary(BIN, || creds.delete(SESSION_ACCOUNT))?;
             if args.forget {
                 store.clear()?;
             }
@@ -292,6 +293,7 @@ fn auth(
                     "a session is already stored; pass --overwrite to replace it".into(),
                 ));
             }
+            RefreshLock::for_binary(BIN)?.before_signin()?;
             let secret = args.source.read(None)?;
             let session = Session::parse_captured(secret.expose())?;
             // Verify with a live read before storing, same as `auth login`:
@@ -355,6 +357,9 @@ fn login(
     }
     let browser = args.browser.browser;
     let retry = retry_command(browser, login.overwrite);
+    // Before anyone signs in or a session is read from stdin: either can only
+    // be done once, and the write needs this lock.
+    RefreshLock::for_binary(BIN)?.before_signin()?;
     let raw = if browser {
         nlnt::browser::capture_session(cli.common.quiet, &retry)?
     } else {
