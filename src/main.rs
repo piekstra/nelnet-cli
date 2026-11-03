@@ -642,17 +642,23 @@ fn emit_login_result(cli: &Cli, verified: bool) {
 
 /// `verified` says whether a read accepted the session.
 fn login_result(verified: bool) -> serde_json::Value {
-    serde_json::json!({ "stored": true, "verified": verified })
+    pk_cli_auth::AuthLogin::stored(verified).to_json()
 }
 
 /// `auth status` makes no request, so it isn't what tests the session. A later
-/// read can repeat the answer, and then nothing but a new sign-in gets past it.
-fn unverified_warning(why: &str) -> String {
+/// read can repeat the answer. A new sign-in gets past that when the session is the
+/// cause, and may not when the block is on this client.
+fn unverified_warning(why: &client::Unverified) -> String {
+    let way_out = if why.edge_block {
+        client::EDGE_BLOCK_WAY_OUT
+    } else {
+        client::READS_KEEP_FAILING
+    };
     format!(
         "the sign-in is kept, but its session is stored unverified: {}. A later read, such as \
          `{BIN} summary`, may settle it; {}.",
-        client::without_way_out(why),
-        client::READS_KEEP_FAILING
+        client::without_way_out(&why.reason),
+        way_out
     )
 }
 
@@ -1215,10 +1221,17 @@ mod tests {
         );
     }
 
+    fn outage(reason: &str) -> client::Unverified {
+        client::Unverified {
+            reason: reason.into(),
+            edge_block: false,
+        }
+    }
+
     /// `auth status` makes no request, so the warning must not send anyone to it.
     #[test]
     fn the_unverified_warning_names_what_tests_the_session() {
-        let w = unverified_warning("portal HTTP 503 for /dummy");
+        let w = unverified_warning(&outage("portal HTTP 503 for /dummy"));
         assert!(
             w.contains("stored unverified: portal HTTP 503 for /dummy"),
             "{w}"
@@ -1232,9 +1245,37 @@ mod tests {
 
         // An error that already names the way out does not name it twice.
         let blocked = client::guard("/dummy", 403, "text/html", "<html></html>").unwrap_err();
-        let w = unverified_warning(&blocked.to_string());
+        let w = unverified_warning(&client::Unverified {
+            reason: blocked.to_string(),
+            edge_block: true,
+        });
         assert!(w.contains("HTTP 403 with an HTML page"), "{w}");
-        assert_eq!(w.matches("reads keep failing").count(), 1, "{w}");
+        assert_eq!(w.matches("auth login --browser").count(), 1, "{w}");
+    }
+
+    /// A block on this client outlasts a new sign-in, so the warning doesn't offer
+    /// one as the fix. An outage keeps the shorter wording.
+    #[test]
+    fn an_edge_block_warns_that_a_new_sign_in_may_not_clear_it() {
+        let html = client::guard("/dummy", 403, "text/html", "<html></html>").unwrap_err();
+        let bot = client::guard("/dummy", 403, "text/html", "HTTP 403 Access denied.").unwrap_err();
+        let page = client::guard("/dummy", 200, "application/json", "<html></html>").unwrap_err();
+        for blocked in [html, bot, page] {
+            let w = unverified_warning(&client::Unverified {
+                reason: blocked.to_string(),
+                edge_block: true,
+            });
+            assert!(w.contains("may not clear this"), "{w}");
+            assert!(w.contains("on this client rather than the session"), "{w}");
+            assert!(w.contains("wait or try another network"), "{w}");
+            let sign_in = w.find("auth login --browser").unwrap();
+            assert!(w.find("try another network").unwrap() < sign_in, "{w}");
+        }
+        for reason in ["portal HTTP 503 for /dummy", "portal HTTP 429 for /dummy"] {
+            let w = unverified_warning(&outage(reason));
+            assert!(!w.contains("may not clear"), "{w}");
+            assert!(w.contains("if reads keep failing"), "{w}");
+        }
     }
 
     #[test]

@@ -68,8 +68,10 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   it does replace it. A `401` or the API's own `403` stores nothing. A later read
   settles an outage, but not an answer that repeats: an HTML `403` and a 2xx with no
   data can come back for this session on every read. Nothing renews on those, and
-  `auth status` makes no request, so a bad session stays stored until `nlnt auth login
-  --browser --overwrite`, which the warning names.
+  `auth status` makes no request, so a bad session stays stored until a new sign-in
+  (`nlnt auth login --browser --overwrite`). For an edge block the warning first says a
+  new sign-in may not clear it and to wait or try another network, because the block is
+  on this client rather than the session.
 - **The profile outlives a failed sign-in.** Any failure once the window has
   opened (a timeout, a closed window, Ctrl-C, a refused verifying read, a bundle
   the parser refuses, a failed keychain write) leaves the profile with what the

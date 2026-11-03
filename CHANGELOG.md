@@ -2,6 +2,16 @@
 
 Earlier releases are described on the GitHub releases page.
 
+## v0.2.3 — 2026-11-03
+
+- An edge block no longer offers a new sign-in as the first fix, because the block is
+  on this client rather than the session. The stored-unverified warning and the errors
+  for an HTML `403` or an HTML answer say a new sign-in may not clear it, and to wait
+  or try another network, before naming `nlnt auth login --browser --overwrite`. The
+  Akamai denial on an ordinary read names no sign-in at all. Exit codes are unchanged.
+- The verifying read reports an HTML page as an edge block rather than as no data.
+- Moves to cli-common v0.20.0, and builds the `auth-login/v1` result with its `AuthLogin`. The output is unchanged.
+
 ## v0.2.2 — 2026-11-03
 
 - `nlnt auth login --json` and `nlnt auth set-credential --json` print a result,
