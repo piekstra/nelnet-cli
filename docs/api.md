@@ -207,8 +207,13 @@ revocation from the competing browser, not the token's own TTL.
 
 **Operational rule that follows:** after capture, the CLI should be the *sole*
 holder of the bundle. Don't run `nlnt` refreshes concurrently against a browser
-session still logged into the same account — and don't run two refreshes at
-once — or reuse detection can revoke the family. The unattended capture script
+session still logged into the same account, or reuse detection can revoke the
+family. Two `nlnt` processes cannot do this to each other: a renewal runs under
+an exclusive lock on `~/.config/nlnt/token-refresh.lock` (an empty file;
+`pk_cli_auth::refresh_lock`), reads the session again once it holds the lock, and
+posts no grant if another process already renewed. A wait is bounded at 75 s,
+then exit 5 naming the lock, with nothing sent; a capture command running under
+the lock can outlast it. The unattended capture script
 sidesteps this by re-minting from the browser only when asked (a short-lived
 headless launch that exits), rather than holding a competing refresh token; and
 when a revocation *does* happen, the next command's capture-command fallback

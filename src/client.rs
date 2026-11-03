@@ -31,6 +31,7 @@
 
 use std::time::Duration;
 
+use pk_cli_auth::refresh_lock::RefreshLock;
 use pk_cli_core::CliError;
 use pk_cli_secrets::{CredentialStore, Secret};
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -279,6 +280,11 @@ impl Portal {
         format!("{}{}", self.base, path)
     }
 
+    /// The refresh token behind this client's access token.
+    pub fn refresh_token(&self) -> Option<&str> {
+        self.session.refresh_token.as_deref()
+    }
+
     fn bearer(&self) -> String {
         format!("Bearer {}", self.session.access_token)
     }
@@ -492,32 +498,73 @@ pub fn refresh_or_relogin(
     cfg: &Config,
     creds: &CredentialStore,
     command: Option<&str>,
+    presented: Option<&str>,
     verbose: bool,
     quiet: bool,
 ) -> Result<Session, CliError> {
-    let refresh = match Portal::from_cached_session(cfg, creds, verbose) {
-        Ok(portal) => Some(portal.refresh(cfg, creds)),
-        // No stored session at all — only the command can bootstrap one, so
-        // without a command surface the actionable "run `nlnt auth login`".
-        Err(e @ CliError::Auth(_)) if command.is_none() => return Err(e),
-        Err(CliError::Auth(_)) => None,
-        Err(e) => return Err(e),
-    };
-
-    match plan_after_refresh(refresh, command.is_some()) {
-        RefreshPlan::Use(session) => Ok(session),
-        RefreshPlan::Surface(err) => Err(err),
-        RefreshPlan::RunCommand => {
-            if !quiet {
-                eprintln!("refresh token unavailable — running capture command");
+    renew_session(
+        &RefreshLock::for_binary(crate::BIN)?,
+        presented,
+        || match Session::from_keychain(creds) {
+            Ok(session) => Ok(Some(session)),
+            // No stored session at all — only the command can bootstrap one, so
+            // without a command surface the actionable "run `nlnt auth login`".
+            Err(CliError::Auth(_)) if command.is_some() => Ok(None),
+            Err(e) => Err(e),
+        },
+        |stored| {
+            let refresh = match stored {
+                Some(session) => {
+                    let portal = Portal::with_session(cfg.base_url(), session, verbose)?;
+                    Some(portal.refresh(cfg, creds))
+                }
+                None => None,
+            };
+            match plan_after_refresh(refresh, command.is_some()) {
+                RefreshPlan::Use(session) => Ok(session),
+                RefreshPlan::Surface(err) => Err(err),
+                RefreshPlan::RunCommand => {
+                    if !quiet {
+                        eprintln!("refresh token unavailable — running capture command");
+                    }
+                    relogin_via_command(
+                        cfg,
+                        creds,
+                        command.expect(
+                            "plan_after_refresh emits RunCommand only when has_command is true",
+                        ),
+                        verbose,
+                    )
+                }
             }
-            relogin_via_command(
-                cfg,
-                creds,
-                command.expect("plan_after_refresh emits RunCommand only when has_command is true"),
-                verbose,
-            )
-        }
+        },
+    )
+}
+
+/// One renewal, safe against every other `nlnt` process. They share one refresh
+/// token, and Duende answers a second use of a retired one by revoking the whole
+/// family (docs/api.md § Token lifetimes). So the session is read again under the
+/// lock, and a stored refresh token other than the one `presented` means another
+/// process renewed while this one waited: its session is used, with no grant.
+fn renew_session(
+    lock: &RefreshLock,
+    presented: Option<&str>,
+    read: impl FnOnce() -> Result<Option<Session>, CliError>,
+    renew: impl FnOnce(Option<Session>) -> Result<Session, CliError>,
+) -> Result<Session, CliError> {
+    lock.hold(|| match read()? {
+        Some(stored) if stored.refresh_token.as_deref() != presented => Ok(stored),
+        stored => renew(stored),
+    })
+}
+
+/// The refresh token stored now, for an explicit `auth refresh`, which has no
+/// failed read to compare against.
+pub fn stored_refresh_token(creds: &CredentialStore) -> Result<Option<String>, CliError> {
+    match Session::from_keychain(creds) {
+        Ok(session) => Ok(session.refresh_token),
+        Err(CliError::Auth(_)) => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -569,7 +616,11 @@ fn relogin_via_command(
     // portal rejects (a stale token, or an MFA-incomplete `acr`), the raw 401
     // from the verify read is baffling — the user just re-logged in. Translate
     // it into the real cause. Non-auth errors (bot wall, 5xx) pass through.
-    establish_session(cfg, creds, session.clone(), true, verbose).map_err(rejected_capture)?;
+    prove_it_reads(cfg, &session, verbose).map_err(rejected_capture)?;
+    // The caller holds the refresh lock, for the capture too: a second process
+    // must wait for this one's bundle, not start a capture of its own and burn
+    // another one-time code.
+    session.store(creds)?;
     Ok(session)
 }
 
@@ -598,11 +649,17 @@ pub fn establish_session(
     verbose: bool,
 ) -> Result<(), CliError> {
     if verify {
-        let portal = Portal::with_session(cfg.base_url(), session.clone(), verbose)?;
-        // A cheap, read-only endpoint that proves the token is accepted.
-        portal.get_text(paths::OVERVIEW)?;
+        prove_it_reads(cfg, &session, verbose)?;
     }
-    session.store(creds)
+    // Under the lock a renewal holds, so one in flight cannot overwrite this
+    // session with the old one's tokens.
+    RefreshLock::for_binary(crate::BIN)?.hold(|| session.store(creds))
+}
+
+/// A cheap, read-only endpoint that proves the token is accepted.
+fn prove_it_reads(cfg: &Config, session: &Session, verbose: bool) -> Result<(), CliError> {
+    let portal = Portal::with_session(cfg.base_url(), session.clone(), verbose)?;
+    portal.get_text(paths::OVERVIEW).map(drop)
 }
 
 /// Whether a 403 body is Akamai's edge denial rather than the application
@@ -849,6 +906,106 @@ mod tests {
             access_token: "a".into(),
             ..Default::default()
         }
+    }
+
+    fn holding(refresh: &str) -> Session {
+        Session {
+            refresh_token: Some(refresh.into()),
+            ..session()
+        }
+    }
+
+    /// Two processes' worth of contenders: each has its own open of the lock
+    /// file, which is what contends, and both saw the same token refused.
+    /// Offline, with the keychain and the token endpoint stood in for.
+    #[test]
+    fn two_contenders_post_one_grant_and_both_use_its_tokens() {
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token-refresh.lock");
+        let stored = Arc::new(Mutex::new(holding("dummy-refresh-1")));
+        let grants = Arc::new(Mutex::new(Vec::new()));
+        let start = Arc::new(Barrier::new(2));
+        let contenders: Vec<_> = (0..2)
+            .map(|_| {
+                let (path, stored, grants, start) = (
+                    path.clone(),
+                    Arc::clone(&stored),
+                    Arc::clone(&grants),
+                    Arc::clone(&start),
+                );
+                std::thread::spawn(move || {
+                    start.wait();
+                    renew_session(
+                        &RefreshLock::at(path),
+                        Some("dummy-refresh-1"),
+                        || Ok(Some(stored.lock().unwrap().clone())),
+                        |session| {
+                            let spent = session.unwrap().refresh_token.unwrap();
+                            grants.lock().unwrap().push(spent);
+                            std::thread::sleep(Duration::from_millis(100));
+                            let fresh = holding("dummy-refresh-2");
+                            *stored.lock().unwrap() = fresh.clone();
+                            Ok(fresh)
+                        },
+                    )
+                })
+            })
+            .collect();
+        for contender in contenders {
+            let session = contender.join().unwrap().unwrap();
+            assert_eq!(session.refresh_token.as_deref(), Some("dummy-refresh-2"));
+        }
+        assert_eq!(*grants.lock().unwrap(), ["dummy-refresh-1"]);
+    }
+
+    #[test]
+    fn a_stored_token_that_changed_skips_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = renew_session(
+            &RefreshLock::at(dir.path().join("token-refresh.lock")),
+            Some("dummy-refresh-1"),
+            || Ok(Some(holding("dummy-refresh-2"))),
+            |_| panic!("another process renewed: no grant"),
+        )
+        .unwrap();
+        assert_eq!(session.refresh_token.as_deref(), Some("dummy-refresh-2"));
+    }
+
+    #[test]
+    fn no_stored_session_still_reaches_the_renewal() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = renew_session(
+            &RefreshLock::at(dir.path().join("token-refresh.lock")),
+            None,
+            || Ok(None),
+            |stored| {
+                assert!(stored.is_none());
+                Ok(holding("dummy-from-the-capture-command"))
+            },
+        )
+        .unwrap();
+        assert!(session.refresh_token.is_some());
+    }
+
+    #[test]
+    fn a_held_lock_is_a_bounded_error_and_no_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token-refresh.lock");
+        RefreshLock::at(&path)
+            .hold(|| {
+                let err = renew_session(
+                    &RefreshLock::at(&path).wait_at_most(Duration::from_millis(100)),
+                    Some("dummy-refresh-1"),
+                    || panic!("no read without the lock"),
+                    |_| panic!("no grant without the lock"),
+                )
+                .unwrap_err();
+                assert!(err.to_string().contains("try again"), "{err}");
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

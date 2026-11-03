@@ -27,7 +27,9 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   window stays open only for the sign-in.
 - **Secrets live only in the macOS keychain**, service `piekstra.nlnt`. Never a
   dotfile, never the config file (`~/.config/nlnt/config.json`), never an
-  environment variable written to disk.
+  environment variable written to disk. `~/.config/nlnt/token-refresh.lock` is an
+  empty file that `nlnt` processes hold while renewing the session, so two never
+  present one rotating refresh token. It holds nothing.
 - **The OAuth token bundle is the secret.** The access token *and* the refresh
   token are stored in the keychain under the same service and are never logged,
   never printed by `--verbose`, and never written to a fixture. A refresh token

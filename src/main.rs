@@ -3,6 +3,7 @@
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use pk_cli_auth::refresh_lock::RefreshLock;
 use pk_cli_auth::{AuthMethod, AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
 use pk_cli_browser::BrowserArgs;
 use pk_cli_config::ConfigStore;
@@ -274,7 +275,9 @@ fn auth(
             Ok(())
         }
         AuthCmd::Logout(args) => {
-            creds.delete(SESSION_ACCOUNT)?;
+            // Under the lock a renewal holds, so one in flight cannot store the
+            // session again after the logout.
+            RefreshLock::for_binary(BIN)?.hold(|| creds.delete(SESSION_ACCOUNT))?;
             if args.forget {
                 store.clear()?;
             }
@@ -452,10 +455,12 @@ fn refresh(
         .filter(|s| !s.trim().is_empty())
         .or_else(|| cfg.refresh_command());
 
+    let presented = client::stored_refresh_token(creds)?;
     let refreshed = client::refresh_or_relogin(
         cfg,
         creds,
         command.as_deref(),
+        presented.as_deref(),
         cli.common.verbose,
         cli.common.quiet,
     )?;
