@@ -233,11 +233,16 @@ fn tool_err(e: CliError) -> ToolError {
         CliError::Other(m) if m.starts_with(SESSION_UNREADABLE) => {
             ToolError::auth(SESSION_UNREADABLE)
         }
-        // A keychain that refused: a person's answer to a prompt, not a dead session.
-        CliError::Keychain(m) => ToolError::other(format!("the keychain refused: {m}")).with_fix(
-            "Ask the user to allow `nlnt` in the keychain prompt, or in Keychain Access, then \
-             call the tool again",
-        ),
+        // A person's answer to a prompt, or a keyring that is not running: not a dead
+        // session, so not a new sign-in.
+        CliError::Keychain(m) => ToolError::other(format!("the keychain could not be used: {m}"))
+            .with_fix(if cfg!(target_os = "macos") {
+                "Ask the user to allow `nlnt` in the keychain prompt, or in Keychain Access, \
+                     then call the tool again"
+            } else {
+                "Ask the user to unlock or start their desktop keyring, then call the tool \
+                     again"
+            }),
         other => other.into(),
     }
 }

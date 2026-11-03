@@ -742,7 +742,12 @@ fn a_refused_keychain_asks_for_access_and_not_a_sign_in() {
         CliError::Keychain("storing credential: denied".into())
     });
     assert!(says.contains("storing credential"), "{says}");
-    assert!(says.contains("Keychain Access"), "{says}");
+    let fix = if cfg!(target_os = "macos") {
+        "Keychain Access"
+    } else {
+        "desktop keyring"
+    };
+    assert!(says.contains(fix), "{says}");
     assert!(!says.contains("auth login"), "{says}");
     assert!(!says.contains("could not be read"), "{says}");
 }
