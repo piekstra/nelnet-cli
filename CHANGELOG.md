@@ -12,10 +12,11 @@ profile (v0.16.0).
   in a scratch profile deleted after every sign-in. Nelnet's cookies carry over,
   so a later sign-in may need less input. The trade is a full Chrome profile on
   disk: cookies, and history with query strings, HTTP cache and site storage,
-  which Chrome's cookie encryption does not cover (SECURITY.md). How much input
+  which Chrome's cookie encryption does not cover, and on Linux with no desktop
+  keyring that encryption uses a publicly known key (SECURITY.md). How much input
   it saves is unverified against the live portal.
-- A timeout, a closed window or Ctrl-C now says the kept profile stays and that
-  `nlnt auth logout` removes it.
+- Any sign-in that fails once the window has opened now says the kept profile
+  stays, possibly with a live session, and that `nlnt auth logout` removes it.
 - The capture now removes the token bundle from `localStorage` as it reads it,
   and removes without reading one already past its `expires_at`. Refresh tokens
   rotate with reuse detection, so a copy left in the kept profile could revoke

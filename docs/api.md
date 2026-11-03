@@ -117,16 +117,19 @@ What follows from it:
 - **The profile keeps more than cookies.** It is a full Chrome profile, so the
   history keeps the sign-in's OIDC redirects with their query strings, beside the
   HTTP cache and site storage; SECURITY.md lists what it holds, and its exact
-  contents for this portal are **UNVERIFIED-LIVE**. A timeout, a
-  closed window or Ctrl-C leaves it in place, and the error says so and names
-  `nlnt auth logout`. `auth status` does not report it.
+  contents for this portal are **UNVERIFIED-LIVE**. Any sign-in that fails once
+  the window has opened leaves it in place (a timeout, a closed window, Ctrl-C, a
+  refused verifying read, a bundle the parser refuses, a failed keychain write),
+  and the error says so and names `nlnt auth logout`. `auth status` does not report it.
 - `auth logout` removes the kept profile as its last step. A sign-in or a Chrome
   using it refuses with exit 1, naming what is already cleared and how to finish;
   close the window and log out again. The capture script's profile below is a
   separate one, which logout does not touch.
 - A captured value the parser refuses is exit 5: the portal changed what it
   stores, which is not a usage mistake. A verifying read the portal refuses is
-  exit 3, with nothing stored.
+  exit 3, with nothing stored. A `429` or `5xx` on that read is exit 5, also with
+  nothing stored and no second read; the bundle has already left the page, so a
+  retry takes a new window.
 - Chrome is found at the standard install paths (Chrome, Chromium, Edge on
   macOS and Linux), or `NLNT_CHROME` names the binary, the same variable
   `scripts/nlnt-capture.mjs` reads. With no Chrome, the error points at the

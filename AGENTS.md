@@ -119,8 +119,10 @@ cannot spend a code or lock the account. Still:
   closure: the binary binds `pk_cli_browser::forget_profile`, tests bind
   `forget_profile_in` under a temp dir. **No test may reach the owner's real
   profile.** It is a full Chrome profile that outlives even a failed sign-in
-  (SECURITY.md lists its contents), so the errors for a timeout, a closed window
-  and Ctrl-C name it (`browser_error`), and a refused removal names what logout
+  (SECURITY.md lists its contents). Every browser sign-in goes through
+  `browser::sign_in`, including the step that parses, verifies and stores the
+  session, so any failure after the window opens names the profile
+  (`failed_sign_in`). A refused removal names what logout
   already cleared (`refused_profile_removal`). `auth status` cannot report it
   until `pk-cli-browser` can say whether it exists; don't recompute its path here.
 - `with_reauth` retries **once** and never loops. The recovery step is

@@ -36,10 +36,12 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   - `localStorage`, IndexedDB and other site storage;
   - any password you let Chrome save.
 
-  Chrome encrypts its cookies at rest (on macOS with the "Chrome Safe Storage"
-  key in the login keychain). That does not cover the history, the HTTP cache or
-  site storage, so the directory's `0700` mode is their only protection. The
-  directory sits where ordinary user-level backups usually look, so exclude it
+  Chrome encrypts its cookies at rest, but how well depends on the platform. On
+  macOS the key is "Chrome Safe Storage" in the login keychain. On Linux it is
+  the desktop keyring; with no keyring Chrome falls back to a fixed, publicly
+  known key, so there the directory's `0700` mode is all that protects the
+  session cookie. Encryption does not cover the history, the HTTP cache or site
+  storage on any platform, so `0700` is their only protection. The directory sits where ordinary user-level backups usually look, so exclude it
   from any backup you don't want holding this.
 - **What this portal leaves in the history.** The sign-in's OIDC redirects stay
   there with their query strings, the one-time authorization code and state
@@ -52,9 +54,11 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   sign-in. A window killed before Chrome writes that removal can leave one, and
   `auth logout` removes it with the profile. While `idsrv` lasts (observed ~1
   hour), anyone who can run a browser in this profile can mint a new session.
-- **The profile outlives a failed sign-in.** A timeout, a closed window or Ctrl-C
-  stores nothing in the keychain, but the profile stays with what the sign-in
-  got as far as, and the error says so. `auth status` reads only the keychain and
+- **The profile outlives a failed sign-in.** Any failure once the window has
+  opened (a timeout, a closed window, Ctrl-C, a refused verifying read, a bundle
+  the parser refuses, a failed keychain write) leaves the profile with what the
+  sign-in got as far as, possibly a live `idsrv` session. Every such error says
+  so and names `nlnt auth logout`. `auth status` reads only the keychain and
   config, so it does not show the profile.
 - **`auth logout` removes the kept profile**, that directory and nothing else, as
   its last step; it clears the stored session too, and there is no way to remove

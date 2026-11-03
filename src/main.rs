@@ -9,7 +9,7 @@ use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{output, CliError, CommonArgs};
 use pk_cli_http::ApiArgs;
-use pk_cli_secrets::CredentialStore;
+use pk_cli_secrets::{CredentialStore, Secret};
 use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
 
 use nlnt::client::{self, Session};
@@ -400,28 +400,30 @@ fn login(
     let browser = args.browser.browser;
     let fresh_profile = args.browser.fresh_profile;
     let retry = retry_command(browser, fresh_profile, login.overwrite);
-    let raw = if browser {
-        nlnt::browser::capture_session(cli.common.quiet, fresh_profile, &retry)?
+    let verify = !login.no_verify;
+    // Both paths are one from the value on: the stdin parser, one verifying
+    // read, the keychain.
+    let store_session = |raw: &Secret| -> Result<(), CliError> {
+        let session = Session::parse_captured(raw.expose()).map_err(|e| {
+            if browser {
+                unexpected_capture(e)
+            } else {
+                e
+            }
+        })?;
+        client::establish_session(cfg, creds, session, verify, cli.common.verbose)
+            .map_err(|e| rejected_at_login(e, &retry))
+    };
+    if browser {
+        nlnt::browser::sign_in(cli.common.quiet, fresh_profile, &retry, store_session)?;
     } else {
         let prompt = if login.non_interactive {
             None
         } else {
             Some("Paste the browser session (oidc.user JSON) or a Bearer token")
         };
-        login.source.read(prompt)?
-    };
-    // From here both paths are one: the stdin parser, one verifying read,
-    // the keychain.
-    let session = Session::parse_captured(raw.expose()).map_err(|e| {
-        if browser {
-            unexpected_capture(e)
-        } else {
-            e
-        }
-    })?;
-    let verify = !login.no_verify;
-    client::establish_session(cfg, creds, session, verify, cli.common.verbose)
-        .map_err(|e| rejected_at_login(e, &retry))?;
+        store_session(&login.source.read(prompt)?)?;
+    }
     if !cli.common.quiet {
         let how = if verify {
             "verified and stored"
@@ -580,6 +582,42 @@ mod tests {
         ];
         for (browser, fresh_profile, overwrite, want) in cases {
             assert_eq!(retry_command(browser, fresh_profile, overwrite), want);
+        }
+    }
+
+    /// The failures from after the bundle is read, likeliest of all to leave a
+    /// live session in the kept profile, name it and keep their exit codes.
+    #[test]
+    fn a_failure_after_the_capture_names_the_kept_profile() {
+        let parsed = Session::parse_captured(r#"{"profile":{}}"#).unwrap_err();
+        let cases = [
+            (unexpected_capture(parsed), 5),
+            (
+                rejected_at_login(
+                    CliError::Auth("portal returned 401".into()),
+                    "nlnt auth login --browser",
+                ),
+                3,
+            ),
+            (CliError::Upstream("portal HTTP 503".into()), 5),
+            (CliError::Keychain("writing the session".into()), 1),
+        ];
+        for (failure, code) in cases {
+            let e = nlnt::browser::finish_sign_in(false, || -> Result<(), _> {
+                Err(BrowserError::Handler(failure.clone()))
+            })
+            .unwrap_err();
+            assert_eq!(e.exit_code(), code, "{e}");
+            let m = e.to_string();
+            assert!(m.contains("browser profile stays on disk"), "{m}");
+            assert!(m.contains("`nlnt auth logout` removes it"), "{m}");
+
+            let fresh = nlnt::browser::finish_sign_in(true, || -> Result<(), _> {
+                Err(BrowserError::Handler(failure))
+            })
+            .unwrap_err();
+            assert_eq!(fresh.exit_code(), code, "{fresh}");
+            assert!(!fresh.to_string().contains("stays on disk"), "{fresh}");
         }
     }
 
