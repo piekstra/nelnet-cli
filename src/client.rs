@@ -912,7 +912,8 @@ pub fn keep_signed_in_session(
 /// dropped connection, a body with no data or an edge block, says nothing about it.
 /// Storing such a session is safe: site storage is cleared before Chrome starts, so
 /// it can only be this sign-in's. A later read settles an outage, not an answer
-/// that repeats, so the warning names [`READS_KEEP_FAILING`].
+/// that repeats, so the warning names a way out ([`READS_KEEP_FAILING`],
+/// [`EDGE_BLOCK_WAY_OUT`]).
 fn keep_finished_sign_in(
     read: impl FnOnce() -> Result<(), CliError>,
     store: impl FnOnce() -> Result<(), CliError>,
@@ -947,6 +948,12 @@ fn prove_it_reads(cfg: &Config, session: &Session, verbose: bool) -> Result<(), 
 /// could get an empty body, `null` or `{}`. The overview is a JSON object, so anything but JSON with something in it is
 /// inconclusive. The caller decides what that means for the session.
 fn verifying_read_holds_data(path: &str, body: &str) -> Result<(), CliError> {
+    if is_html_page(body) {
+        return Err(CliError::Upstream(format!(
+            "the verifying read of {path} answered with an HTML page rather than the API's \
+             answer (edge error or challenge); {EDGE_BLOCK_WAY_OUT}"
+        )));
+    }
     let holds_data = match serde_json::from_str::<serde_json::Value>(body) {
         Ok(serde_json::Value::Object(fields)) => !fields.is_empty(),
         Ok(serde_json::Value::Array(items)) => !items.is_empty(),
@@ -990,12 +997,30 @@ pub const RENEW_ADVICE: &str =
 pub const READS_KEEP_FAILING: &str =
     "if reads keep failing, run `nlnt auth login --browser --overwrite`";
 
-/// A message without [`READS_KEEP_FAILING`], for a caller that words its own way
-/// out, or that has no stored session for reads to fail with.
+/// The way out of an edge block. A block on this client outlasts a new sign-in, so
+/// the sign-in comes last.
+pub const EDGE_BLOCK_WAY_OUT: &str = "a new sign-in may not clear this, because the block is on \
+     this client rather than the session; wait or try another network, and if reads still \
+     fail, run `nlnt auth login --browser --overwrite`";
+
+/// The way out of the Akamai denial on an ordinary read, which names no sign-in: it
+/// comes before any credential is considered.
+const BOT_WALL_WAY_OUT: &str = "a new sign-in won't clear this, because the block is on this \
+     client rather than the session; wait or try another network";
+
+/// Whether a message reports a block on this client rather than on the session.
+pub fn is_edge_block(message: &str) -> bool {
+    [EDGE_BLOCK_WAY_OUT, BOT_WALL_WAY_OUT]
+        .iter()
+        .any(|way_out| message.ends_with(way_out))
+}
+
+/// A message without its way out, for a caller that words its own, or that has no
+/// stored session for reads to fail with.
 pub fn without_way_out(message: &str) -> &str {
-    message
-        .strip_suffix(READS_KEEP_FAILING)
-        .and_then(|m| m.strip_suffix("; "))
+    [READS_KEEP_FAILING, EDGE_BLOCK_WAY_OUT, BOT_WALL_WAY_OUT]
+        .iter()
+        .find_map(|way_out| message.strip_suffix(way_out)?.strip_suffix("; "))
         .unwrap_or(message)
 }
 
@@ -1004,7 +1029,7 @@ fn bot_wall_error(path: &str) -> CliError {
         "blocked by the portal's bot protection (Akamai) on {path}, not by your \
          credentials — the request was refused before the token was read. This usually \
          means the sentinel headers were stripped by a proxy. See the 'Akamai bot wall' \
-         section of docs/api.md"
+         section of docs/api.md; {BOT_WALL_WAY_OUT}"
     ))
 }
 
@@ -1024,7 +1049,7 @@ fn classify_error(path: &str, status: u16, body: &str) -> Option<CliError> {
     if status == 403 && is_html_page(body) {
         return Some(CliError::Upstream(format!(
             "blocked in front of the portal on {path}: HTTP 403 with an HTML page rather than \
-             the API's answer, which says nothing about the token; {READS_KEEP_FAILING}"
+             the API's answer, which says nothing about the token; {EDGE_BLOCK_WAY_OUT}"
         )));
     }
     if matches!(status, 401 | 403) {
@@ -1048,7 +1073,8 @@ pub fn guard(path: &str, status: u16, content_type: &str, body: &str) -> Result<
     // page. Treat as upstream, not success.
     if content_type.contains("application/json") && body.trim_start().starts_with('<') {
         return Err(CliError::Upstream(format!(
-            "portal returned HTML instead of JSON for {path} (edge error or challenge)"
+            "portal returned HTML instead of JSON for {path} (edge error or challenge); \
+             {EDGE_BLOCK_WAY_OUT}"
         )));
     }
     if !(200..300).contains(&status) {
@@ -1108,6 +1134,11 @@ mod tests {
             "<html></html>",
         ] {
             let e = verifying_read_holds_data("/dummy", body).unwrap_err();
+            assert_eq!(
+                is_edge_block(&e.to_string()),
+                body.starts_with('<'),
+                "{body:?}"
+            );
             assert_eq!(e.exit_code(), 5, "{body:?}");
             let m = e.to_string();
             assert!(m.contains("/dummy"), "{m}");
@@ -1166,6 +1197,8 @@ mod tests {
         assert_eq!(err.exit_code(), 5);
         assert!(err.to_string().contains("bot protection"));
         assert!(!err.to_string().contains("auth login"));
+        assert!(err.to_string().ends_with(BOT_WALL_WAY_OUT));
+        assert!(is_edge_block(&err.to_string()));
     }
 
     #[test]
@@ -1350,10 +1383,8 @@ mod tests {
             assert!(m.contains("HTTP 403 with an HTML page"), "{m}");
             assert!(m.contains("says nothing about the token"), "{m}");
             // Nothing renews on this answer, so the error names the way out.
-            assert!(
-                m.ends_with("; if reads keep failing, run `nlnt auth login --browser --overwrite`"),
-                "{m}"
-            );
+            assert!(m.ends_with(&format!("; {EDGE_BLOCK_WAY_OUT}")), "{m}");
+            assert!(is_edge_block(&m), "{m}");
         }
     }
 
@@ -1364,8 +1395,14 @@ mod tests {
         let m = nothing_stored(blocked).to_string();
         assert!(m.contains("says nothing about the token"), "{m}");
         assert!(m.ends_with("; nothing was stored"), "{m}");
-        assert!(!m.contains("reads keep failing"), "{m}");
+        assert!(!m.contains("may not clear"), "{m}");
+        let bot = guard("/dummy", 403, "text/html", "HTTP 403 Access denied.").unwrap_err();
+        let m = nothing_stored(bot).to_string();
+        assert!(!m.contains("won't clear"), "{m}");
         assert_eq!(without_way_out("portal HTTP 503"), "portal HTTP 503");
+        let outage =
+            "portal HTTP 503; if reads keep failing, run `nlnt auth login --browser --overwrite`";
+        assert_eq!(without_way_out(outage), "portal HTTP 503");
     }
 
     #[test]

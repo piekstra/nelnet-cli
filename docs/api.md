@@ -155,7 +155,9 @@ What follows from it:
     connection, a 2xx with no data or a body that isn't JSON, or an edge block (the
     Akamai denial, or any `403` with an HTML page). The session is stored, exit 0,
     with a warning on stderr, even under `-q`, that it is unverified and that if reads
-    keep failing, the way out is `nlnt auth login --browser --overwrite`. `--json`
+    keep failing, the way out is `nlnt auth login --browser --overwrite`. For an edge
+    block it says first that a new sign-in may not clear it, because the block is on
+    this client rather than the session, and to wait or try another network. `--json`
     prints `{"schema":"auth-login/v1","stored":true,"verified":false}`. `verified` is
     always there, and is `true` when a read accepted the session. `auth login` and
     `auth set-credential` print the same result, and `set-credential` always verifies.
@@ -339,7 +341,8 @@ code:
   other 403 with an HTML page, whichever vendor's wording it uses, on the reasoning
   that the API answers JSON; no such page has been observed (**UNVERIFIED-LIVE**).
   An HTML 403 from the portal itself would read the same, so its error also says
-  to run `nlnt auth login --browser --overwrite` if reads keep failing.
+  to run `nlnt auth login --browser --overwrite` if reads still fail after waiting
+  or trying another network.
 - Do **not** try to defeat this with a real browser at runtime; the header set is
   the sanctioned, tested path.
 
