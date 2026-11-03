@@ -2,6 +2,13 @@
 
 Earlier releases are described on the GitHub releases page.
 
+## v0.2.2 — 2026-11-03
+
+- `nlnt auth login --json` prints a result, schema `auth-login/v1`, once the session
+  is stored. A session stored unverified adds `verified: false`, whether its read
+  could not tell or `--no-verify` skipped it. A verified login has no such field. The
+  exit code stays 0.
+
 ## v0.2.1 — 2026-11-03
 
 - `nlnt auth login --browser` keeps a finished sign-in when the read that checks it

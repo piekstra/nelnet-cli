@@ -624,7 +624,24 @@ fn login(
             creds.service()
         );
     }
+    output::emit(
+        cli.common.json,
+        "auth-login",
+        login_result(verify && unverified.is_none()),
+        |_| {},
+    );
     Ok(())
+}
+
+/// `auth login --json`, which runs only once the session is stored. `verified` is
+/// there only when it is false, so a script can test for it and a verified login's
+/// result stays as it would be without the field.
+fn login_result(verified: bool) -> serde_json::Value {
+    if verified {
+        serde_json::json!({ "stored": true })
+    } else {
+        serde_json::json!({ "stored": true, "verified": false })
+    }
 }
 
 /// `auth status` makes no request, so it isn't what tests the session. A later
@@ -1183,6 +1200,18 @@ mod tests {
         let m = e.to_string();
         assert!(m.contains("HTTP 403 with an HTML page"), "{m}");
         assert!(!m.contains("refused the session"), "{m}");
+    }
+
+    #[test]
+    fn the_login_result_says_verified_only_when_it_is_false() {
+        assert_eq!(
+            output::tagged("auth-login", login_result(true)),
+            serde_json::json!({ "schema": "auth-login/v1", "stored": true })
+        );
+        assert_eq!(
+            output::tagged("auth-login", login_result(false)),
+            serde_json::json!({ "schema": "auth-login/v1", "stored": true, "verified": false })
+        );
     }
 
     /// `auth status` makes no request, so the warning must not send anyone to it.
