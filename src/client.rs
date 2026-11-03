@@ -911,7 +911,8 @@ pub fn keep_signed_in_session(
 /// refusing the session ([`classify_error`]). Anything else, such as a 429, a 5xx, a
 /// dropped connection, a body with no data or an edge block, says nothing about it.
 /// Storing such a session is safe: site storage is cleared before Chrome starts, so
-/// it can only be this sign-in's, and the next read tests it.
+/// it can only be this sign-in's. A later read settles an outage, not an answer
+/// that repeats, so the warning names [`READS_KEEP_FAILING`].
 fn keep_finished_sign_in(
     read: impl FnOnce() -> Result<(), CliError>,
     store: impl FnOnce() -> Result<(), CliError>,
@@ -928,7 +929,9 @@ fn keep_finished_sign_in(
 /// For a route that stores nothing when the read can't prove the session.
 fn nothing_stored(err: CliError) -> CliError {
     match err {
-        CliError::Upstream(m) => CliError::Upstream(format!("{m}; nothing was stored")),
+        CliError::Upstream(m) => {
+            CliError::Upstream(format!("{}; nothing was stored", without_way_out(&m)))
+        }
         other => other,
     }
 }
@@ -982,6 +985,20 @@ fn is_html_page(body: &str) -> bool {
 pub const RENEW_ADVICE: &str =
     "; run `nlnt auth refresh` (or `nlnt auth login --browser --overwrite`)";
 
+/// The way out of an answer a stored session can't get past. Nothing renews on an
+/// edge block, and `auth login` refuses a stored session without `--overwrite`.
+pub const READS_KEEP_FAILING: &str =
+    "if reads keep failing, run `nlnt auth login --browser --overwrite`";
+
+/// A message without [`READS_KEEP_FAILING`], for a caller that words its own way
+/// out, or that has no stored session for reads to fail with.
+pub fn without_way_out(message: &str) -> &str {
+    message
+        .strip_suffix(READS_KEEP_FAILING)
+        .and_then(|m| m.strip_suffix("; "))
+        .unwrap_or(message)
+}
+
 fn bot_wall_error(path: &str) -> CliError {
     CliError::Upstream(format!(
         "blocked by the portal's bot protection (Akamai) on {path}, not by your \
@@ -1007,7 +1024,7 @@ fn classify_error(path: &str, status: u16, body: &str) -> Option<CliError> {
     if status == 403 && is_html_page(body) {
         return Some(CliError::Upstream(format!(
             "blocked in front of the portal on {path}: HTTP 403 with an HTML page rather than \
-             the API's answer, which says nothing about the token"
+             the API's answer, which says nothing about the token; {READS_KEEP_FAILING}"
         )));
     }
     if matches!(status, 401 | 403) {
@@ -1332,7 +1349,23 @@ mod tests {
             assert!(m.contains("/dummy"), "{m}");
             assert!(m.contains("HTTP 403 with an HTML page"), "{m}");
             assert!(m.contains("says nothing about the token"), "{m}");
+            // Nothing renews on this answer, so the error names the way out.
+            assert!(
+                m.ends_with("; if reads keep failing, run `nlnt auth login --browser --overwrite`"),
+                "{m}"
+            );
         }
+    }
+
+    /// A piped route has no stored session for reads to fail with.
+    #[test]
+    fn nothing_stored_drops_the_way_out_and_keeps_the_reason() {
+        let blocked = guard("/dummy", 403, "text/html", "<html></html>").unwrap_err();
+        let m = nothing_stored(blocked).to_string();
+        assert!(m.contains("says nothing about the token"), "{m}");
+        assert!(m.ends_with("; nothing was stored"), "{m}");
+        assert!(!m.contains("reads keep failing"), "{m}");
+        assert_eq!(without_way_out("portal HTTP 503"), "portal HTTP 503");
     }
 
     #[test]

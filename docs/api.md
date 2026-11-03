@@ -154,11 +154,18 @@ What follows from it:
   - Anything else says nothing about the session: a `429`, a `5xx`, a `404`, a dropped
     connection, a 2xx with no data or a body that isn't JSON, or an edge block (the
     Akamai denial, or any `403` with an HTML page). The session is stored, exit 0,
-    with a warning on stderr, even under `-q`, that it is unverified and that the next
-    read tests it. `auth status` makes no request, so it doesn't.
-  - Storing it is safe. Site storage is cleared before Chrome starts, so the session
-    can only be this sign-in's. A session already stored can't be replaced by accident:
-    login refuses before the window opens without `--overwrite`.
+    with a warning on stderr, even under `-q`, that it is unverified and that if reads
+    keep failing, the way out is `nlnt auth login --browser --overwrite`.
+  - A later read settles a `429`, a `5xx` or a dropped connection once the outage
+    ends. It can't settle an answer that repeats: an HTML `403` and a 2xx with no data
+    can come back for this session on every read, as can a `404` or the Akamai
+    denial. Those reads exit 5 (a `404`, exit 4) and nothing renews, so a bad session
+    stays stored until that new sign-in. `auth status` makes no request and reports a
+    session with a refresh token as valid, so it settles nothing either.
+  - Storing it can't mix up sessions. Site storage is cleared before Chrome starts, so
+    the session can only be this sign-in's. A session already stored can't be replaced
+    by accident: login refuses before the window opens without `--overwrite`. With
+    `--overwrite`, an unverified session does replace it.
   - `auth login --stdin`, `--from-env` and `auth set-credential` don't do this. The
     value can be supplied again, so anything but a proven read stores nothing.
 - Chrome is found at the standard install paths (Chrome, Chromium, Edge on
@@ -326,8 +333,10 @@ code:
 - A **403 whose body is the Akamai denial** (`Access denied`, `Reference #`) is
   reported as **upstream (exit 5)**, never as an auth failure — it happens before
   the token is considered, so "re-authenticate" would be wrong advice. So is any
-  other 403 with an HTML page, whichever vendor's wording it uses, since the API
-  answers JSON.
+  other 403 with an HTML page, whichever vendor's wording it uses, on the reasoning
+  that the API answers JSON; no such page has been observed (**UNVERIFIED-LIVE**).
+  An HTML 403 from the portal itself would read the same, so its error also says
+  to run `nlnt auth login --browser --overwrite` if reads keep failing.
 - Do **not** try to defeat this with a real browser at runtime; the header set is
   the sanctioned, tested path.
 
@@ -400,7 +409,7 @@ strings are space-padded (`"DIRECT SUB     "`) and must be trimmed.
 
 ### A 200 is not always success; a 403 is not always auth
 
-The auth guard maps: Akamai-denial or HTML 403 → upstream (5); other 401/403 → auth (3),
+The auth guard maps: Akamai-denial or HTML 403 (**UNVERIFIED-LIVE**) → upstream (5); other 401/403 → auth (3),
 which triggers one refresh-and-retry; HTML where JSON was promised → upstream.
 
 ### The statement download needs `%PDF-`

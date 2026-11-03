@@ -627,11 +627,14 @@ fn login(
     Ok(())
 }
 
-/// `auth status` makes no request, so it isn't what tests the session.
+/// `auth status` makes no request, so it isn't what tests the session. A later
+/// read can repeat the answer, and then nothing but a new sign-in gets past it.
 fn unverified_warning(why: &str) -> String {
     format!(
-        "the sign-in is kept, but its session is stored unverified: {why}. The next read tests \
-         it, such as `{BIN} summary`."
+        "the sign-in is kept, but its session is stored unverified: {}. A later read, such as \
+         `{BIN} summary`, may settle it; {}.",
+        client::without_way_out(why),
+        client::READS_KEEP_FAILING
     )
 }
 
@@ -1192,6 +1195,16 @@ mod tests {
         );
         assert!(w.contains("`nlnt summary`"), "{w}");
         assert!(!w.contains("auth status"), "{w}");
+        assert!(
+            w.ends_with("if reads keep failing, run `nlnt auth login --browser --overwrite`."),
+            "{w}"
+        );
+
+        // An error that already names the way out does not name it twice.
+        let blocked = client::guard("/dummy", 403, "text/html", "<html></html>").unwrap_err();
+        let w = unverified_warning(&blocked.to_string());
+        assert!(w.contains("HTTP 403 with an HTML page"), "{w}");
+        assert_eq!(w.matches("reads keep failing").count(), 1, "{w}");
     }
 
     #[test]

@@ -63,8 +63,12 @@ The data it touches — loan balances, accrued interest, payment history, SSN-be
   `5xx`, a dropped connection, a body with no data, an edge block) stores the session
   anyway, with a warning even under `-q`. It can only be this sign-in's, because site
   storage is cleared before Chrome starts, and it can't replace a stored session
-  without `--overwrite`, which login checks before the window opens. A `401` or the
-  API's own `403` stores nothing.
+  without `--overwrite`, which login checks before the window opens. With `--overwrite`
+  it does replace it. A `401` or the API's own `403` stores nothing. A later read
+  settles an outage, but not an answer that repeats: an HTML `403` and a 2xx with no
+  data can come back for this session on every read. Nothing renews on those, and
+  `auth status` makes no request, so a bad session stays stored until `nlnt auth login
+  --browser --overwrite`, which the warning names.
 - **The profile outlives a failed sign-in.** Any failure once the window has
   opened (a timeout, a closed window, Ctrl-C, a refused verifying read, a bundle
   the parser refuses, a failed keychain write) leaves the profile with what the
