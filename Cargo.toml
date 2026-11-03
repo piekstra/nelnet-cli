@@ -1,6 +1,6 @@
 [package]
 name = "nelnet-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Command-line access to the Nelnet federal student-loan servicing portal: balances, accrued interest, payment history, and 1098-E tax documents."
@@ -20,14 +20,14 @@ name = "nlnt"
 path = "src/main.rs"
 
 [dependencies]
-pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0", features = ["reqwest"] }
-pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0" }
-pk-cli-config = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0" }
-pk-cli-selfupdate = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0" }
-pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0" }
-pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0" }
-pk-cli-documents = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0" }
-pk-cli-browser = { git = "https://github.com/piekstra/cli-common", tag = "v0.9.0" }
+pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1", features = ["reqwest"] }
+pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1" }
+pk-cli-config = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1" }
+pk-cli-selfupdate = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1" }
+pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1" }
+pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1" }
+pk-cli-documents = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1" }
+pk-cli-browser = { git = "https://github.com/piekstra/cli-common", tag = "v0.15.1" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
