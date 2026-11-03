@@ -169,7 +169,7 @@ token) and the portal password live in the macOS keychain under `piekstra.nlnt`.
 | 2 | usage error |
 | 3 | auth required / session expired |
 | 4 | not found |
-| 5 | upstream / provider error (incl. a download that was not a PDF) |
+| 5 | upstream / provider error (incl. a download that was not a PDF), or another `nlnt` process holding a token lock past the wait |
 | 6 | confirmation required (or a write refused — this CLI is read-only) |
 
 ## Read-only, and how that is enforced

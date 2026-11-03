@@ -3,6 +3,7 @@
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use pk_cli_auth::refresh_lock::RefreshLock;
 use pk_cli_auth::{AuthMethod, AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
 use pk_cli_browser::BrowserArgs;
 use pk_cli_config::ConfigStore;
@@ -274,7 +275,10 @@ fn auth(
             Ok(())
         }
         AuthCmd::Logout(args) => {
-            creds.delete(SESSION_ACCOUNT)?;
+            // Under the lock a renewal holds if it can be had, so one in flight
+            // cannot store the session again after the logout. The delete runs
+            // either way: the lock must not keep a credential on the machine.
+            RefreshLock::forget_for_binary(BIN, || creds.delete(SESSION_ACCOUNT))?;
             if args.forget {
                 store.clear()?;
             }
@@ -289,6 +293,9 @@ fn auth(
                     "a session is already stored; pass --overwrite to replace it".into(),
                 ));
             }
+            // Before the read: a secret piped in once cannot be read again. It does
+            // not wait on a busy lock, so bad input still fails at once.
+            RefreshLock::for_binary(BIN)?.try_hold(|| Ok(()))?;
             let secret = args.source.read(None)?;
             let session = Session::parse_captured(secret.expose())?;
             // Verify with a live read before storing, same as `auth login`:
@@ -352,9 +359,15 @@ fn login(
     }
     let browser = args.browser.browser;
     let retry = retry_command(browser, login.overwrite);
+    let lock = RefreshLock::for_binary(BIN)?;
     let raw = if browser {
+        // Before anyone signs in: the write needs this lock.
+        lock.before_signin()?;
         nlnt::browser::capture_session(cli.common.quiet, &retry)?
     } else {
+        // Before the read: a session piped in once cannot be read again. It does
+        // not wait on a busy lock, so bad input still fails at once.
+        lock.try_hold(|| Ok(()))?;
         let prompt = if login.non_interactive {
             None
         } else {
@@ -452,10 +465,12 @@ fn refresh(
         .filter(|s| !s.trim().is_empty())
         .or_else(|| cfg.refresh_command());
 
+    let presented = client::stored_session(creds)?;
     let refreshed = client::refresh_or_relogin(
         cfg,
         creds,
         command.as_deref(),
+        presented.as_ref(),
         cli.common.verbose,
         cli.common.quiet,
     )?;

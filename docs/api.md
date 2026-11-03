@@ -181,6 +181,16 @@ header for the full env knobs (`NLNT_USERNAME`, `NLNT_PASSWORD`,
 `NLNT_KEYCHAIN_SERVICE`, `NLNT_KEYCHAIN_ACCOUNT`, `NLNT_CAPTURE_PROFILE`,
 `NLNT_CAPTURE_HEADED`, `NLNT_CHROME`, `NLNT_PLAYWRIGHT_DIR`, `NLNT_OTP_COMMAND`).
 
+**Stopping a capture.** `nlnt` stops a capture command after 5 minutes: SIGTERM, then
+SIGKILL 20 s later. The reference script stays inside that: it gives up after 4
+minutes, limits each `$NLNT_OTP_COMMAND` run to 15 s, and stops Chrome on SIGTERM. A
+hard kill still skips its teardown, as does a `refresh_command` that is more than one
+command, where only the shell gets the signal. That can leave its Chrome running on
+the signed-in profile with the debugging port open (9455 unless
+`NLNT_CAPTURE_PORT` says otherwise), so any local process can read the token bundle,
+and its page can renew as a second holder of the family. Find it with
+`lsof -iTCP:9455 -sTCP:LISTEN` and stop that process.
+
 ### Token lifetimes — what's measured, what isn't
 
 | Value | How long | Provenance |
@@ -207,8 +217,17 @@ revocation from the competing browser, not the token's own TTL.
 
 **Operational rule that follows:** after capture, the CLI should be the *sole*
 holder of the bundle. Don't run `nlnt` refreshes concurrently against a browser
-session still logged into the same account — and don't run two refreshes at
-once — or reuse detection can revoke the family. The unattended capture script
+session still logged into the same account, or reuse detection can revoke the
+family. Two `nlnt` processes cannot do this to each other: a grant runs under an
+exclusive lock on `~/.config/nlnt/token-refresh.lock` (an empty file;
+`pk_cli_auth::refresh_lock`), reads the session again once it holds the lock, and
+posts no grant if another process already renewed. A wait is bounded at 75 s, then
+exit 5 naming the lock, with nothing sent. A capture command runs outside that lock,
+under `token-capture.lock` beside it, so one runs at a time and a login or logout
+never waits on one. A process that finds it held waits for that capture and uses its
+session; if it stored none, that process fails rather than spending another one-time
+code. A capture is stopped after 5 minutes, exit 5, though anything it started may keep
+running (§ Unattended re-login). The unattended capture script
 sidesteps this by re-minting from the browser only when asked (a short-lived
 headless launch that exits), rather than holding a competing refresh token; and
 when a revocation *does* happen, the next command's capture-command fallback
