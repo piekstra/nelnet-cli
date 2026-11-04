@@ -120,6 +120,8 @@ security add-generic-password -U -s piekstra.nlnt -a password
 nlnt auth refresh --command "node $(pwd)/scripts/nlnt-capture.mjs" --save
 ```
 
+A capture command does not run on Windows, so `--command` is refused there.
+
 The reference script (`scripts/nlnt-capture.mjs`) drives real Chrome with its own
 persistent profile (`auth logout` does not touch that one): it silently renews with no MFA **while the identity session
 lives (observed ~1 hour)**, and after that does a full username/password login —
@@ -186,7 +188,7 @@ filtering by date returns the wrong form.
 | `base_url` | API host override (`mmaapi.nelnet.studentaid.gov`). |
 | `auth_url` | Identity host override (`auth.nelnet.studentaid.gov`). |
 | `auto_refresh` | Refresh the access token automatically on expiry (default on). |
-| `refresh_command` | Capture command for unattended re-login. Env `NLNT_REFRESH_COMMAND`. |
+| `refresh_command` | Capture command for unattended re-login. Env `NLNT_REFRESH_COMMAND`. Ignored on Windows. |
 
 Secrets are **never** stored here — the OAuth token bundle (access + refresh
 token) and the portal password live in the macOS keychain under `piekstra.nlnt`,
