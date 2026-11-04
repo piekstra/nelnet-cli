@@ -247,8 +247,9 @@ header for the full env knobs (`NLNT_USERNAME`, `NLNT_PASSWORD`,
 `NLNT_KEYCHAIN_SERVICE`, `NLNT_KEYCHAIN_ACCOUNT`, `NLNT_CAPTURE_PROFILE`,
 `NLNT_CAPTURE_HEADED`, `NLNT_CHROME`, `NLNT_PLAYWRIGHT_DIR`, `NLNT_OTP_COMMAND`).
 
-**Stopping a capture.** `nlnt` stops a capture command after 5 minutes: SIGTERM, then
-SIGKILL 20 s later. The reference script stays inside that: it gives up after 4
+**Stopping a capture.** A capture command does not run on Windows, which has no `sh`
+or SIGTERM to run and stop it with. Elsewhere `nlnt` stops one after 5 minutes: SIGTERM,
+then SIGKILL 20 s later. The reference script stays inside that: it gives up after 4
 minutes, limits each `$NLNT_OTP_COMMAND` run to 15 s, and stops Chrome on SIGTERM. A
 hard kill still skips its teardown, as does a `refresh_command` that is more than one
 command, where only the shell gets the signal. That can leave its Chrome running on

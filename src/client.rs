@@ -503,6 +503,28 @@ impl Portal {
     }
 }
 
+/// A capture command runs under `sh`, and at its deadline is asked to stop with SIGTERM, which is
+/// what lets the reference script stop its Chrome. Windows has neither.
+pub const CAPTURE_RUNS_HERE: bool = cfg!(unix);
+
+/// The command a renewal may fall back to. Where none can run, a dead refresh token keeps its own
+/// message and remedy, not a missing-program error.
+fn capture_on(command: Option<&str>, runs_here: bool) -> Option<&str> {
+    command.filter(|_| runs_here)
+}
+
+/// `--command` asked for by name, where none can run.
+pub fn refuse_capture_flag(given: bool, runs_here: bool) -> Result<(), CliError> {
+    if given && !runs_here {
+        return Err(CliError::Usage(
+            "--command is not available on Windows: a capture command runs under `sh` and is \
+             stopped with SIGTERM; sign in with `nlnt auth login --browser --overwrite`"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Run the capture command and parse its stdout into a [`Session`].
 ///
 /// The command is a shell line (run via `sh -c`) whose **stdout** is a fresh
@@ -648,6 +670,7 @@ pub fn refresh_or_relogin(
     verbose: bool,
     quiet: bool,
 ) -> Result<Session, CliError> {
+    let command = capture_on(command, CAPTURE_RUNS_HERE);
     let lock = RefreshLock::for_binary(crate::BIN)?;
     let plan = renew_session(
         &lock,
@@ -1311,6 +1334,17 @@ mod tests {
         let err = guard("/api/1/loan/overview", 401, "application/json", "{}").unwrap_err();
         assert_eq!(err.exit_code(), 3);
         assert!(err.to_string().contains("auth refresh"));
+    }
+
+    #[test]
+    fn where_no_capture_can_run_a_configured_one_is_ignored_and_the_flag_refused() {
+        assert_eq!(capture_on(Some("cmd"), true), Some("cmd"));
+        assert_eq!(capture_on(Some("cmd"), false), None);
+        assert!(refuse_capture_flag(false, false).is_ok());
+        assert!(refuse_capture_flag(true, true).is_ok());
+        let e = refuse_capture_flag(true, false).unwrap_err();
+        assert_eq!(e.exit_code(), 2);
+        assert!(e.to_string().contains("auth login --browser"), "{e}");
     }
 
     /// reqwest re-sends a body on a 307, so this is what would carry the refresh token away.

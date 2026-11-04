@@ -744,6 +744,8 @@ fn a_refused_keychain_asks_for_access_and_not_a_sign_in() {
     assert!(says.contains("storing credential"), "{says}");
     let fix = if cfg!(target_os = "macos") {
         "Keychain Access"
+    } else if cfg!(windows) {
+        "Credential Manager"
     } else {
         "desktop keyring"
     };

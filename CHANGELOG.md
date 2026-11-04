@@ -6,6 +6,8 @@ Earlier releases are described on the GitHub releases page.
 
 - Windows: releases attach `nlnt-x86_64-pc-windows-msvc.tar.gz`, and the `.mcpb` runs there.
   A session too long for one Windows credential is split and read back as one.
+  A capture command does not run there: `--command` is refused and a configured
+  `refresh_command` is ignored.
 - `nelnet_payments` and `nelnet_documents` page by position, so a row that arrives between
   pages repeats nothing and skips nothing. Rows of the same day now run in a fixed order of
   their own. A cursor from an earlier version still works, as the count of rows it holds.

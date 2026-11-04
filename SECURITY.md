@@ -185,6 +185,8 @@ items and reads them back as one, so a bundle that outgrows the limit at a renew
 its rotated refresh token. A version before 0.4.0 cannot read a split session, so a
 downgrade needs a new `nlnt auth login --browser`.
 Windows has no kept browser profile: every sign-in there uses a scratch one.
+A capture command does not run on Windows, since one runs under `sh` and is stopped with
+SIGTERM. `--command` is refused there, and a configured `refresh_command` is ignored.
 
 **`nlnt mcp --http`** is the path for Claude on the web and mobile. It binds 127.0.0.1
 only, and is reached through a Cloudflare Tunnel and a Worker in your own account,

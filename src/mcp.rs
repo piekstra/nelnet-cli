@@ -224,6 +224,9 @@ fn tool_err(e: CliError) -> ToolError {
             .with_fix(if cfg!(target_os = "macos") {
                 "Ask the user to allow `nlnt` in the keychain prompt, or in Keychain Access, \
                      then call the tool again"
+            } else if cfg!(windows) {
+                "Ask the user to check the `piekstra.nlnt` entries in Windows Credential \
+                     Manager, then call the tool again"
             } else {
                 "Ask the user to unlock or start their desktop keyring, then call the tool \
                      again"
@@ -732,14 +735,8 @@ impl<S: Source> NelnetTools<S> {
                 (key, payment_item(row, detailed))
             })
             .collect();
-        // History newest first, what is scheduled soonest first.
-        let order = if args.scheduled {
-            Order::Ascending
-        } else {
-            Order::Descending
-        };
         ToolOutput::new(&PaymentsOut {
-            page: page.page(matched, order, "since/until")?,
+            page: page.page(matched, Order::Descending, "since/until")?,
         })
     }
 

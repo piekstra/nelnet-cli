@@ -147,7 +147,7 @@ struct LoginCmd {
 #[derive(Args, Debug)]
 struct RefreshArgs {
     /// Capture command to run when the refresh token is dead (overrides the
-    /// `refresh_command` config and `$NLNT_REFRESH_COMMAND`).
+    /// `refresh_command` config and `$NLNT_REFRESH_COMMAND`). Not on Windows.
     #[arg(long, value_name = "CMD")]
     command: Option<String>,
     /// Persist `--command` to config as `refresh_command` for future refreshes.
@@ -729,6 +729,7 @@ fn refresh(
     creds: &CredentialStore,
     cfg: &Config,
 ) -> Result<(), CliError> {
+    client::refuse_capture_flag(args.command.is_some(), client::CAPTURE_RUNS_HERE)?;
     // Persist an explicit --command first, so a later plain `auth refresh` (and
     // automatic refresh) can use it.
     if args.save {
