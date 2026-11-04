@@ -403,7 +403,8 @@ pub struct PaymentsOut {
 /// not a row left to the count within its day.
 fn no_id(what: &str) -> ToolError {
     ToolError::upstream(format!(
-        "Nelnet sent a {what} with no id, so this list is not reported; its answer has changed"
+        "Nelnet sent a {what} with no id, so its place in this list cannot be held and the list \
+         is not reported"
     ))
 }
 
