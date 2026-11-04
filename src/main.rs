@@ -412,9 +412,8 @@ fn run_logout(
     }
     let line = logout_browser(steps, remove_profile)?;
     if !common.quiet {
-        eprintln!("{line}");
-        if let Some(removed) = token_answer {
-            eprintln!("{}", pk_cli_mcp::forget_note(BIN, removed));
+        for said in logout_lines(line, token_answer) {
+            eprintln!("{said}");
         }
     }
     Ok(())
@@ -422,6 +421,14 @@ fn run_logout(
 
 /// What a logout step clears, and how it went.
 type LogoutStep = (&'static str, Result<(), CliError>);
+
+/// What a finished logout says. `token_answer` is what the keychain answered when `--forget` asked
+/// it to delete the connector token: a server on the variable never had an item to remove, so
+/// either answer is owed the note.
+fn logout_lines(line: String, token_answer: Option<bool>) -> Vec<String> {
+    let note = token_answer.map(|removed| pk_cli_mcp::forget_note(BIN, removed));
+    std::iter::once(line).chain(note).collect()
+}
 
 /// `auth logout`'s last step, and its report. The profile `auth login --browser`
 /// keeps holds the identity host's cookies (its remembered device and session) and
@@ -896,6 +903,19 @@ mod tests {
 
     /// The logout's profile step on a temp dir through `test-util`'s
     /// `forget_profile_in`, so the test never reaches the owner's real profile.
+    #[test]
+    fn a_forget_owes_the_note_whatever_the_keychain_held() {
+        assert_eq!(logout_lines("out".into(), None), ["out"]);
+        let removed = logout_lines("out".into(), Some(true));
+        assert!(
+            removed[1].contains("keeps accepting the token"),
+            "{removed:?}"
+        );
+        let none = logout_lines("out".into(), Some(false));
+        assert!(none[1].contains("held no"), "{none:?}");
+        assert!(none[1].contains("$NLNT_MCP_TOKEN"), "{none:?}");
+    }
+
     #[test]
     fn logout_removes_the_kept_browser_profile() {
         let root = tempfile::tempdir().unwrap();
