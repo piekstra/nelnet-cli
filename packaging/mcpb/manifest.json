@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "nlnt",
   "display_name": "Nelnet (nlnt)",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Read-only access to your own Nelnet student-loan balances, payments, repayment status and 1098-E interest, through the open-source nlnt CLI.",
   "long_description": "Ask Claude about your federal student loans at Nelnet: what is owed and how much interest has accrued, what was paid and how it split between principal and interest, what is due next, and the interest figure for your 1098-E. Five read-only tools: nelnet_loans, nelnet_payments, nelnet_repayment, nelnet_tax and nelnet_documents. Nothing can make or schedule a payment, change autopay or a repayment plan, or change anything at Nelnet. The extension asks for no password: first install the nlnt CLI and run `nlnt auth login --browser` in a terminal, which signs you in on Nelnet's own pages and stores the session in your OS keychain. The bundled nlnt reads it from there and renews it in place. When a session ends, the tools say so; run `nlnt auth login --browser --overwrite` again. What the tools return goes to Claude as part of your conversation. On macOS the first call asks for keychain access, and a renewal asks to write the session back; choose Always Allow for each. A new version of the extension is a new program to the keychain and can ask again. Unofficial; not affiliated with Nelnet.",
   "author": {

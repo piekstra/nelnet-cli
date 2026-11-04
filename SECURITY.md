@@ -177,6 +177,7 @@ running keeps the copy it read until it stops. To end the connector's access, ru
 --new-token --overwrite` and restart the server (`launchctl kickstart -k gui/$(id -u)/com.piekstra.nlnt-mcp-http`);
 the old token works until the restart. To stop serving, run `launchctl bootout
 gui/$(id -u)/com.piekstra.nlnt-mcp-http`, stop the tunnel and delete `HOME_NELNET_TOKEN`.
+A token supplied through `$NLNT_MCP_TOKEN` is not stored, so the logout cannot reach it: to end it, unset the variable and stop the server.
 
 On Windows the session is held in pieces. It is one credential-store value holding an
 access token, a refresh token and an id token, and Windows limits an item to 2,560 bytes
