@@ -2,6 +2,12 @@
 
 Earlier releases are described on the GitHub releases page.
 
+## v0.4.1 — 2026-11-04
+
+- `nelnet_documents`: a row with no document id is an upstream error, and so is a `nelnet_payments` row with no confirmation number that says nothing else. Both used to fall to the count within their day.
+- `auth logout --forget` speaks to a server on `$NLNT_MCP_TOKEN` too, which never had a keychain item to remove.
+- cli-common v0.29.0, up from v0.27.0.
+
 ## v0.4.0 — 2026-11-03
 
 - Windows: releases attach `nlnt-x86_64-pc-windows-msvc.tar.gz`, and the `.mcpb` runs there.

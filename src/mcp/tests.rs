@@ -521,6 +521,24 @@ fn a_payment_with_no_date_is_kept_and_sorts_last() {
     assert_eq!(items[1]["amount"], "1.00");
 }
 
+/// With no confirmation number, what a row says is what holds its place. A row saying nothing has
+/// nothing to hold it.
+#[test]
+fn a_payment_saying_nothing_is_an_upstream_error() {
+    let body = json!({"paymentHistoryList": [
+        {"sumOfPaymentAmount": 1.0, "effectiveDate": "2026-02-01T00:00:00"},
+        {"effectiveDate": "2026-01-01T00:00:00"},
+    ]})
+    .to_string();
+    let says = error(
+        &with(Fixtures::default().answering(paths::PAYMENT_HISTORY, &body)),
+        PAYMENTS_TOOL,
+        json!({"since": "2025-01-01"}),
+    );
+    assert!(says.starts_with("upstream:"), "{says}");
+    assert!(says.contains("no id"), "{says}");
+}
+
 // ---- nelnet_repayment ------------------------------------------------------------
 
 #[test]
@@ -689,6 +707,24 @@ fn tax_year_uses_the_year_a_title_names_and_else_the_date() {
 
     let says = error(&tools, DOCUMENTS_TOOL, json!({"tax_year": 25}));
     assert!(says.starts_with("usage:"), "{says}");
+}
+
+/// A row with no id could not hold its place in a position cursor, so it fails the call.
+#[test]
+fn a_document_with_no_id_is_an_upstream_error() {
+    let body = json!({"statementList": [
+        {"documentId": "kept", "documentTitle": "July Statement",
+         "docReceivedDate": "2026-07-01T00:00:00"},
+        {"documentTitle": "June Statement", "docReceivedDate": "2026-06-01T00:00:00"},
+    ]})
+    .to_string();
+    let says = error(
+        &with(Fixtures::default().answering(paths::STATEMENTS, &body)),
+        DOCUMENTS_TOOL,
+        json!({}),
+    );
+    assert!(says.starts_with("upstream:"), "{says}");
+    assert!(says.contains("no id"), "{says}");
 }
 
 #[test]

@@ -399,20 +399,32 @@ pub struct PaymentsOut {
     pub page: Page<PaymentItem>,
 }
 
+/// A row with no id could not hold its place in a position cursor, so it is a changed provider and
+/// not a row left to the count within its day.
+fn no_id(what: &str) -> ToolError {
+    ToolError::upstream(format!(
+        "Nelnet sent a {what} with no id, so this list is not reported; its answer has changed"
+    ))
+}
+
 /// Where a payment belongs in its list: its date, and its confirmation number if it has one, or
-/// what it says if not, so it keeps its place across pages.
-fn payment_key(row: &checked::PaymentRow) -> PositionKey {
+/// what it says if not, so it keeps its place across pages. Nelnet sends a confirmation number of
+/// 0 on rows it has not numbered, so what a row says is an id here. A row saying neither has none.
+fn payment_key(row: &checked::PaymentRow) -> Result<PositionKey, ToolError> {
     let date = row.date.as_deref().unwrap_or_default();
     match &row.confirmation {
-        Some(confirmation) => PositionKey::new(date, confirmation),
+        Some(confirmation) => Ok(PositionKey::new(date, confirmation)),
         None => {
             let amount = row.amount.as_ref().map(|m| m.amount.as_str());
+            if row.description.is_none() && amount.is_none() {
+                return Err(no_id("payment"));
+            }
             let said = format!(
                 "{} {}",
                 row.description.as_deref().unwrap_or_default(),
                 amount.unwrap_or_default()
             );
-            PositionKey::new(date, &said)
+            Ok(PositionKey::new(date, &said))
         }
     }
 }
@@ -730,11 +742,8 @@ impl<S: Source> NelnetTools<S> {
         let rows = checked::payments(answers.body(path)?, list_key, path).map_err(tool_err)?;
         let matched = filter_range(rows, &window, |r| r.date.clone())
             .into_iter()
-            .map(|row| {
-                let key = payment_key(&row);
-                (key, payment_item(row, detailed))
-            })
-            .collect();
+            .map(|row| Ok((payment_key(&row)?, payment_item(row, detailed))))
+            .collect::<Result<Vec<_>, ToolError>>()?;
         ToolOutput::new(&PaymentsOut {
             page: page.page(matched, Order::Descending, "since/until")?,
         })
@@ -864,18 +873,16 @@ impl<S: Source> NelnetTools<S> {
             .filter(|r| category.is_none() || r.category == category)
             .filter(|r| args.tax_year.is_none() || r.tax_year == args.tax_year)
             .map(|r| {
-                let key = PositionKey::new(
-                    r.date.as_deref().unwrap_or_default(),
-                    r.id.as_deref().unwrap_or_default(),
-                );
+                let id = r.id.as_deref().ok_or_else(|| no_id("document"))?;
+                let key = PositionKey::new(r.date.as_deref().unwrap_or_default(), id);
                 let item = DocumentItem {
                     date: r.date,
                     category: r.category,
                     id: r.id,
                 };
-                (key, item)
+                Ok((key, item))
             })
-            .collect();
+            .collect::<Result<Vec<_>, ToolError>>()?;
         ToolOutput::new(&DocumentsOut {
             page: page.page(
                 matched,

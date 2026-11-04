@@ -403,18 +403,18 @@ fn run_logout(
     remove_profile: impl FnOnce() -> Result<bool, BrowserError>,
 ) -> Result<(), CliError> {
     let mut steps: Vec<LogoutStep> = vec![("the session", delete_session().map(drop))];
-    let mut token_removed = false;
+    let mut token_answer = None;
     if forget {
         steps.push(("the saved settings", store.clear().map(drop)));
         let token = delete_http_token();
-        token_removed = matches!(token, Ok(true));
+        token_answer = token.as_ref().ok().copied();
         steps.push(("the connector's bearer token", token.map(drop)));
     }
     let line = logout_browser(steps, remove_profile)?;
     if !common.quiet {
         eprintln!("{line}");
-        if token_removed {
-            eprintln!("{}", pk_cli_mcp::stop_note(BIN));
+        if let Some(removed) = token_answer {
+            eprintln!("{}", pk_cli_mcp::forget_note(BIN, removed));
         }
     }
     Ok(())
