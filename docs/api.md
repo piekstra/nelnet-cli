@@ -175,8 +175,8 @@ What follows from it:
     value can be supplied again, so anything but a proven read stores nothing.
 - Chrome is found at the standard install paths (Chrome, Chromium, Edge on
   macOS and Linux), or `NLNT_CHROME` names the binary, the same variable
-  `scripts/nlnt-capture.mjs` reads. With no Chrome, the error points at the
-  fallback below.
+  `scripts/nlnt-capture.mjs` reads. Windows has no standard path here, so it needs
+  `NLNT_CHROME`. With no Chrome, the error points at the fallback below.
 - The wait is 10 minutes. A timeout or a closed window is exit 3, Ctrl-C
   cancels (Chrome is stopped, a `--fresh-profile` scratch profile removed), and
   `-q` silences the status lines. `--fresh-profile` without `--browser` is exit 2. `--browser` refuses `--stdin`, `--from-env`, `--no-verify` and

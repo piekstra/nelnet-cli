@@ -178,11 +178,13 @@ running keeps the copy it read until it stops. To end the connector's access, ru
 the old token works until the restart. To stop serving, run `launchctl bootout
 gui/$(id -u)/com.piekstra.nlnt-mcp-http`, stop the tunnel and delete `HOME_NELNET_TOKEN`.
 
-There is no Windows build. The session is one credential-store item holding an access
-token, a refresh token and an id token, and Windows limits an item to 2,560 bytes
-(1,280 UTF-16 units), with `pk-cli-secrets` not splitting one. The size of a real bundle
-has not been measured against that limit, and a bundle that outgrew it at a renewal
-would lose the rotated refresh token.
+On Windows the session is held in pieces. It is one credential-store value holding an
+access token, a refresh token and an id token, and Windows limits an item to 2,560 bytes
+(1,280 UTF-16 units). `pk-cli-secrets` splits a longer value into `session.pk-split-*`
+items and reads them back as one, so a bundle that outgrows the limit at a renewal keeps
+its rotated refresh token. A version before 0.4.0 cannot read a split session, so a
+downgrade needs a new `nlnt auth login --browser`.
+Windows has no kept browser profile: every sign-in there uses a scratch one.
 
 **`nlnt mcp --http`** is the path for Claude on the web and mobile. It binds 127.0.0.1
 only, and is reached through a Cloudflare Tunnel and a Worker in your own account,

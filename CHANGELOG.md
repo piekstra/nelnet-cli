@@ -2,6 +2,22 @@
 
 Earlier releases are described on the GitHub releases page.
 
+## v0.4.0 — 2026-11-03
+
+- Windows: releases attach `nlnt-x86_64-pc-windows-msvc.tar.gz`, and the `.mcpb` runs there.
+  A session too long for one Windows credential is split and read back as one.
+- `nelnet_payments` and `nelnet_documents` page by position, so a row that arrives between
+  pages repeats nothing and skips nothing. Rows of the same day now run in a fixed order of
+  their own. A cursor from an earlier version still works, as the count of rows it holds.
+- The tools read what a failure means from the error's reason, not its wording.
+- `auth logout --forget` says what a removed connector token does not end: a running
+  `nlnt mcp --http` keeps the token it started with.
+- A refresh token stays on the host it was for. reqwest re-sends a body on a 307 or 308, so
+  the token request refuses a redirect to another host, and other requests refuse one that
+  leaves https.
+- A network error no longer quotes the URL it was reading.
+- cli-common v0.27.0, up from v0.21.0.
+
 ## v0.3.0 — 2026-11-03
 
 - `nlnt mcp`: read-only tools for Claude, `nelnet_loans`, `nelnet_payments`,

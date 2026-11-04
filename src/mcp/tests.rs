@@ -752,6 +752,68 @@ fn a_refused_keychain_asks_for_access_and_not_a_sign_in() {
     assert!(!says.contains("could not be read"), "{says}");
 }
 
+/// A page boundary falls inside a day, and a payment posts before the next page is read.
+/// A cursor holds no server state, so a second set of answers stands for the later read.
+#[test]
+fn a_payment_that_posts_between_pages_repeats_nothing_and_skips_nothing() {
+    let body = |rows: &[(&str, &str)]| {
+        let list: Vec<Value> = rows
+            .iter()
+            .map(|(date, confirmation)| {
+                json!({"effectiveDate": date, "sumOfPaymentAmount": 10.0,
+                       "confirmationNumber": confirmation})
+            })
+            .collect();
+        json!({"paymentHistoryList": list}).to_string()
+    };
+    let before = [
+        ("2026-05-02", "4"),
+        ("2026-05-01", "3"),
+        ("2026-05-01", "2"),
+        ("2026-04-01", "1"),
+    ];
+    let mut after = vec![("2026-06-01", "5"), ("2026-05-01", "6")];
+    after.extend(before);
+    let args = json!({"limit": 2, "response_format": "detailed"});
+    let confirmations = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["confirmation"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let first = ok(
+        &with(Fixtures::default().answering(paths::PAYMENT_HISTORY, &body(&before))),
+        PAYMENTS_TOOL,
+        args.clone(),
+    );
+    let mut seen = confirmations(&first);
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0], "4");
+
+    let later = with(Fixtures::default().answering(paths::PAYMENT_HISTORY, &body(&after)));
+    let mut cursor = first["next_cursor"].clone();
+    while cursor.is_string() {
+        let mut next = args.clone();
+        next["cursor"] = cursor;
+        let page = ok(&later, PAYMENTS_TOOL, next);
+        seen.extend(confirmations(&page));
+        cursor = page["next_cursor"].clone();
+    }
+    // Each row that was there is seen once, and the newer day is behind the cursor. Which side
+    // the new row of the 1st falls on is up to its fingerprint.
+    for id in ["4", "3", "2", "1"] {
+        assert_eq!(
+            seen.iter().filter(|s| *s == id).count(),
+            1,
+            "{id}: {seen:?}"
+        );
+    }
+    assert!(!seen.contains(&"5".to_string()), "{seen:?}");
+}
+
 #[test]
 fn auto_refresh_off_asks_for_a_refresh_and_not_a_sign_in() {
     let says = failing_with(paths::TAX_INFO, TAX_TOOL, crate::commands::auto_refresh_off);
@@ -791,13 +853,4 @@ fn a_call_past_its_time_stops_asking_nelnet() {
         fixtures.calls().is_empty(),
         "nothing is sent past the deadline"
     );
-}
-
-#[test]
-fn a_call_waits_for_the_lock_only_so_long() {
-    let lock = Mutex::new(());
-    let held = hold(&lock, Duration::ZERO).expect("a free lock is taken");
-    assert!(hold(&lock, Duration::from_millis(60)).is_none());
-    drop(held);
-    assert!(hold(&lock, Duration::ZERO).is_some());
 }

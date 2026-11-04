@@ -28,23 +28,23 @@
 //! the command to run. Listing the tools touches no credential and no file.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use pk_cli_config::ConfigStore;
 use pk_cli_core::dates;
-use pk_cli_core::{CliError, CommonArgs, Money, RangeArgs};
+use pk_cli_core::{CliError, CommonArgs, Money, RangeArgs, Reason};
 use pk_cli_mcp::{
-    parse_args, ListArgs, Page, PageRequest, ResponseFormat, Server, ToolDef, ToolError,
-    ToolOutput, Toolset,
+    hold_within, parse_args, ListArgs, Order, Page, PageRequest, PositionKey, PositionRequest,
+    ResponseFormat, Server, ToolDef, ToolError, ToolOutput, Toolset,
 };
 use pk_cli_secrets::CredentialStore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::client::{paths, Portal, SESSION_UNREADABLE, SIGN_IN_AGAIN};
-use crate::commands::{filter_range, Ctx, AUTO_REFRESH_OFF};
+use crate::client::{paths, Portal, SESSION_UNREADABLE};
+use crate::commands::{filter_range, Ctx};
 use crate::config::Config;
 use crate::parse::{self, checked};
 use crate::BIN;
@@ -132,25 +132,11 @@ pub fn read_all(reads: &dyn Reads, want: &Want, deadline: Instant) -> Result<Ans
             Ok(body) => {
                 got.insert(*path, body);
             }
-            Err(e @ CliError::Auth(_)) => return Err(e),
-            Err(e) if required => return Err(e),
+            Err(e) if required || e.is_auth() => return Err(e),
             Err(_) => {}
         }
     }
     Ok(Answers(got))
-}
-
-/// The lock, or `None` once `wait` has passed.
-fn hold(lock: &Mutex<()>, wait: Duration) -> Option<MutexGuard<'_, ()>> {
-    let until = Instant::now() + wait;
-    loop {
-        match lock.try_lock() {
-            Ok(held) => return Some(held),
-            Err(TryLockError::Poisoned(e)) => return Some(e.into_inner()),
-            Err(TryLockError::WouldBlock) if Instant::now() >= until => return None,
-            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
 }
 
 /// The live portal, through the session and renewal the commands use.
@@ -174,7 +160,7 @@ impl Source for LiveSource {
     /// keychain item.
     fn fetch(&self, want: &Want) -> Result<Answers, CliError> {
         let deadline = Instant::now() + CALL_BUDGET;
-        let _one = hold(&self.one_at_a_time, QUEUE_WAIT).ok_or_else(|| {
+        let _one = hold_within(&self.one_at_a_time, QUEUE_WAIT).ok_or_else(|| {
             CliError::Upstream(
                 "another call to Nelnet is still running in this server, and may be waiting on \
                  a keychain prompt on this computer; ask the user to check for one, then try \
@@ -220,19 +206,18 @@ impl<S: Source> NelnetTools<S> {
 /// standard remedy for an auth failure is a new sign-in, which is the wrong step
 /// when `auto_refresh` is simply off.
 fn tool_err(e: CliError) -> ToolError {
+    match e.reason() {
+        Some(Reason::RenewalOff) => {
+            return ToolError::auth("the access token has expired and auto_refresh is off")
+                .with_fix(
+                    "Ask the user to run `nlnt auth refresh` in a terminal, then call the tool \
+                     again",
+                );
+        }
+        Some(Reason::CredentialUnreadable) => return ToolError::auth(SESSION_UNREADABLE),
+        _ => {}
+    }
     match e {
-        CliError::Auth(m) if m == AUTO_REFRESH_OFF => {
-            ToolError::auth("the access token has expired and auto_refresh is off").with_fix(
-                "Ask the user to run `nlnt auth refresh` in a terminal, then call the tool again",
-            )
-        }
-        CliError::Auth(m) => match m.split_once(SIGN_IN_AGAIN) {
-            Some((reason, _)) => ToolError::auth(reason),
-            None => CliError::Auth(m).into(),
-        },
-        CliError::Other(m) if m.starts_with(SESSION_UNREADABLE) => {
-            ToolError::auth(SESSION_UNREADABLE)
-        }
         // A person's answer to a prompt, or a keyring that is not running: not a dead
         // session, so not a new sign-in.
         CliError::Keychain(m) => ToolError::other(format!("the keychain could not be used: {m}"))
@@ -409,6 +394,24 @@ pub struct PaymentItem {
 pub struct PaymentsOut {
     #[serde(flatten)]
     pub page: Page<PaymentItem>,
+}
+
+/// Where a payment belongs in its list: its date, and its confirmation number if it has one, or
+/// what it says if not, so it keeps its place across pages.
+fn payment_key(row: &checked::PaymentRow) -> PositionKey {
+    let date = row.date.as_deref().unwrap_or_default();
+    match &row.confirmation {
+        Some(confirmation) => PositionKey::new(date, confirmation),
+        None => {
+            let amount = row.amount.as_ref().map(|m| m.amount.as_str());
+            let said = format!(
+                "{} {}",
+                row.description.as_deref().unwrap_or_default(),
+                amount.unwrap_or_default()
+            );
+            PositionKey::new(date, &said)
+        }
+    }
 }
 
 fn payment_item(row: checked::PaymentRow, detailed: bool) -> PaymentItem {
@@ -695,7 +698,7 @@ impl<S: Source> NelnetTools<S> {
             non_empty(args.since.as_deref()),
             non_empty(args.until.as_deref()),
         )?;
-        let page = PageRequest::new(
+        let page = PositionRequest::new(
             &args.list,
             &PaymentsFilter {
                 since: window.since.as_deref(),
@@ -724,10 +727,19 @@ impl<S: Source> NelnetTools<S> {
         let rows = checked::payments(answers.body(path)?, list_key, path).map_err(tool_err)?;
         let matched = filter_range(rows, &window, |r| r.date.clone())
             .into_iter()
-            .map(|row| payment_item(row, detailed))
+            .map(|row| {
+                let key = payment_key(&row);
+                (key, payment_item(row, detailed))
+            })
             .collect();
+        // History newest first, what is scheduled soonest first.
+        let order = if args.scheduled {
+            Order::Ascending
+        } else {
+            Order::Descending
+        };
         ToolOutput::new(&PaymentsOut {
-            page: page.page(matched, "since/until")?,
+            page: page.page(matched, order, "since/until")?,
         })
     }
 
@@ -834,7 +846,7 @@ impl<S: Source> NelnetTools<S> {
                 "tax_year must be a year such as 2025, got {year}"
             )));
         }
-        let page = PageRequest::new(
+        let page = PositionRequest::new(
             &args.list,
             &DocumentsFilter {
                 category: category.as_deref(),
@@ -854,14 +866,25 @@ impl<S: Source> NelnetTools<S> {
             .into_iter()
             .filter(|r| category.is_none() || r.category == category)
             .filter(|r| args.tax_year.is_none() || r.tax_year == args.tax_year)
-            .map(|r| DocumentItem {
-                date: r.date,
-                category: r.category,
-                id: r.id,
+            .map(|r| {
+                let key = PositionKey::new(
+                    r.date.as_deref().unwrap_or_default(),
+                    r.id.as_deref().unwrap_or_default(),
+                );
+                let item = DocumentItem {
+                    date: r.date,
+                    category: r.category,
+                    id: r.id,
+                };
+                (key, item)
             })
             .collect();
         ToolOutput::new(&DocumentsOut {
-            page: page.page(matched, "category, tax_year or since/until")?,
+            page: page.page(
+                matched,
+                Order::Descending,
+                "category, tax_year or since/until",
+            )?,
         })
     }
 }

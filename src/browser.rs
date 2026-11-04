@@ -168,6 +168,19 @@ pub fn map_message(error: CliError, rewrite: impl FnOnce(String) -> String) -> C
         CliError::ConfirmationRequired(m) => CliError::ConfirmationRequired(rewrite(m)),
         CliError::Keychain(m) => CliError::Keychain(rewrite(m)),
         CliError::Other(m) => CliError::Other(rewrite(m)),
+        // Only the message is rewritten: the cause and the way out stay what they were.
+        detailed @ CliError::Detailed(_) => {
+            let (reason, remedy) = (detailed.reason(), detailed.remedy().map(String::from));
+            let rewritten = map_message(detailed.into_base(), rewrite);
+            let rewritten = match reason {
+                Some(reason) => rewritten.because(reason),
+                None => rewritten,
+            };
+            match remedy {
+                Some(remedy) => rewritten.with_remedy(remedy),
+                None => rewritten,
+            }
+        }
     }
 }
 

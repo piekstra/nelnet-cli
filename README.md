@@ -69,7 +69,8 @@ macOS, `$XDG_DATA_HOME/piekstra.nlnt/browser-profile` or
 `~/.local/share/piekstra.nlnt/browser-profile` on Linux), so Nelnet's cookies
 carry over and a later sign-in may need less input: no one-time code on a device
 Nelnet remembers. `nlnt auth login --browser --fresh-profile` signs in once
-through a scratch profile, deleted afterwards, and leaves the kept one alone.
+through a scratch profile, deleted afterwards, and leaves the kept one alone. On Windows
+every sign-in uses a scratch profile, and `NLNT_CHROME` names the browser.
 
 The trade is more than cookies. `nlnt` clears the page's storage, the token bundle
 with it, before Chrome starts and once it stops; after a crash, the next launch
@@ -271,8 +272,7 @@ macOS the bundled binary is a different program to the keychain, so its first ca
 raises a keychain prompt to read the `piekstra.nlnt` session, and its first renewal one
 to write it back; choose **Always Allow** for each, or every call will ask again. A new
 version of the extension is a new program to the keychain, and can ask again. While a
-prompt waits for you, tool calls answer that one may be waiting. There is no Windows
-build; [`SECURITY.md`](SECURITY.md) says why.
+prompt waits for you, tool calls answer that one may be waiting.
 
 Any other MCP client that launches a local server can run `nlnt mcp`.
 

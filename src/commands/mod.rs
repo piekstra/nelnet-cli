@@ -11,7 +11,7 @@ pub mod transactions;
 use std::cell::RefCell;
 
 use pk_cli_auth::reauth::with_reauth;
-use pk_cli_core::{CliError, CommonArgs};
+use pk_cli_core::{CliError, CommonArgs, Reason};
 use pk_cli_secrets::CredentialStore;
 use serde_json::Value;
 
@@ -20,13 +20,11 @@ use crate::config::Config;
 
 pub use pk_cli_core::output::{rows_of as items, table_view};
 
-/// What a lapsed access token says when `auto_refresh` is off.
-pub const AUTO_REFRESH_OFF: &str =
-    "access token expired — run `nlnt auth refresh` (auto_refresh is off)";
-
 /// A lapsed access token when `auto_refresh` is off.
 pub fn auto_refresh_off() -> CliError {
-    CliError::Auth(AUTO_REFRESH_OFF.into())
+    CliError::Auth("access token expired".into())
+        .because(Reason::RenewalOff)
+        .with_remedy("run `nlnt auth refresh` (auto_refresh is off)")
 }
 
 /// Everything a command needs: the global flags, resolved config, and the
