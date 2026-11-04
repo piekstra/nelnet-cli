@@ -102,7 +102,7 @@ pub fn finish_sign_in<T>(
     fresh_profile: bool,
     sign_in: impl FnOnce() -> Result<T, BrowserError>,
 ) -> Result<T, CliError> {
-    sign_in().map_err(|e| failed_sign_in(e, fresh_profile))
+    sign_in().map_err(|e| failed_sign_in(e, scratch_profile(fresh_profile)))
 }
 
 /// Open the sign-in window at [`START_URL`], wait for the owner to sign in,
@@ -129,6 +129,12 @@ fn capture_session(
             "the browser capture read no session".into(),
         ))
     })
+}
+
+/// Whether a sign-in leaves no profile behind. `pk-cli-browser` keeps none on Windows, where every
+/// sign-in uses a scratch one, so a failed one has nothing to warn about.
+fn scratch_profile(fresh_profile: bool) -> bool {
+    fresh_profile || !cfg!(unix)
 }
 
 /// The family's error for a failed sign-in, with [`PROFILE_STAYS`] added when
@@ -168,6 +174,19 @@ pub fn map_message(error: CliError, rewrite: impl FnOnce(String) -> String) -> C
         CliError::ConfirmationRequired(m) => CliError::ConfirmationRequired(rewrite(m)),
         CliError::Keychain(m) => CliError::Keychain(rewrite(m)),
         CliError::Other(m) => CliError::Other(rewrite(m)),
+        // Only the message is rewritten: the cause and the way out stay what they were.
+        detailed @ CliError::Detailed(_) => {
+            let (reason, remedy) = (detailed.reason(), detailed.remedy().map(String::from));
+            let rewritten = map_message(detailed.into_base(), rewrite);
+            let rewritten = match reason {
+                Some(reason) => rewritten.because(reason),
+                None => rewritten,
+            };
+            match remedy {
+                Some(remedy) => rewritten.with_remedy(remedy),
+                None => rewritten,
+            }
+        }
     }
 }
 
@@ -269,6 +288,12 @@ mod tests {
                 1,
             ),
         ]
+    }
+
+    #[test]
+    fn only_a_platform_that_keeps_a_profile_warns_about_one() {
+        assert!(scratch_profile(true));
+        assert_eq!(scratch_profile(false), !cfg!(unix));
     }
 
     #[test]

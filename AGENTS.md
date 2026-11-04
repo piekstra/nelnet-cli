@@ -11,7 +11,7 @@ surface and libraries live in
 there before changing the command surface**; do not reconstruct the spec from
 this repo's code, it drifts.
 
-Every `pk-cli-*` crate is pinned to the same `cli-common` revision, **v0.21.0**
+Every `pk-cli-*` crate is pinned to the same `cli-common` revision, **v0.27.0**
 (see `Cargo.toml`); never mix versions. `auth login --browser` uses `pk-cli-browser`,
 whose kept profile needs cli-common v0.16.0 or later and whose site-storage
 clearing and `profile_exists` need v0.19.0. Renewals take `pk-cli-auth`'s

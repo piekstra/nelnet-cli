@@ -147,7 +147,7 @@ struct LoginCmd {
 #[derive(Args, Debug)]
 struct RefreshArgs {
     /// Capture command to run when the refresh token is dead (overrides the
-    /// `refresh_command` config and `$NLNT_REFRESH_COMMAND`).
+    /// `refresh_command` config and `$NLNT_REFRESH_COMMAND`). Not on Windows.
     #[arg(long, value_name = "CMD")]
     command: Option<String>,
     /// Persist `--command` to config as `refresh_command` for future refreshes.
@@ -193,14 +193,11 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             // cannot store the session again after the logout. The delete runs
             // either way: the lock must not keep a credential on the machine.
             || RefreshLock::forget_for_binary(BIN, || creds.delete(SESSION_ACCOUNT)),
-            || creds.delete(MCP_TOKEN_ACCOUNT),
+            || creds.delete(pk_cli_mcp::HTTP_TOKEN_ACCOUNT),
             || pk_cli_browser::forget_profile(BIN),
         )
     })
 }
-
-/// The keychain item `mcp --new-token` saves the `--http` bearer token in.
-const MCP_TOKEN_ACCOUNT: &str = "mcp-http-token";
 
 /// `auth logout`, passed in so a test can run the dispatch without the keychain
 /// or the real browser profile.
@@ -406,16 +403,19 @@ fn run_logout(
     remove_profile: impl FnOnce() -> Result<bool, BrowserError>,
 ) -> Result<(), CliError> {
     let mut steps: Vec<LogoutStep> = vec![("the session", delete_session().map(drop))];
+    let mut token_removed = false;
     if forget {
         steps.push(("the saved settings", store.clear().map(drop)));
-        steps.push((
-            "the connector's bearer token",
-            delete_http_token().map(drop),
-        ));
+        let token = delete_http_token();
+        token_removed = matches!(token, Ok(true));
+        steps.push(("the connector's bearer token", token.map(drop)));
     }
     let line = logout_browser(steps, remove_profile)?;
     if !common.quiet {
         eprintln!("{line}");
+        if token_removed {
+            eprintln!("{}", pk_cli_mcp::stop_note(BIN));
+        }
     }
     Ok(())
 }
@@ -463,7 +463,7 @@ fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>
         match result {
             Ok(()) => cleared.push(name),
             Err(e) => {
-                reasons.push(format!("{name}: {}", bare_message(&e)));
+                reasons.push(format!("{name}: {}", e.message()));
                 if index == 0 && matches!(e, CliError::Upstream(_)) {
                     may_return = true;
                 } else {
@@ -525,26 +525,12 @@ fn incomplete_logout(steps: Vec<LogoutStep>, removal: Result<bool, BrowserError>
     }
 }
 
-/// A `CliError`'s message without the prefix its `Display` adds, so a report
-/// built from several doesn't repeat them.
-fn bare_message(error: &CliError) -> &str {
-    match error {
-        CliError::Usage(m)
-        | CliError::Auth(m)
-        | CliError::NotFound(m)
-        | CliError::Upstream(m)
-        | CliError::ConfirmationRequired(m)
-        | CliError::Keychain(m)
-        | CliError::Other(m) => m,
-    }
-}
-
 /// `message` with `first`'s exit code. `Keychain` and `Other` both exit 1 and only
 /// `Other` adds no prefix. `NotFound`, `Upstream` and `ConfirmationRequired` alone
 /// have their codes, so their `Display` prefix stays, once: the lock's delete can
 /// return `Upstream` when a renewal outlasts its wait.
 fn with_exit_code_of(first: CliError, message: String) -> CliError {
-    match first {
+    match first.into_base() {
         CliError::Keychain(_) | CliError::Other(_) => CliError::Other(message),
         other => nlnt::browser::map_message(other, |_| message),
     }
@@ -726,16 +712,14 @@ fn unexpected_capture(err: CliError) -> CliError {
 /// sign-in, keeping what the portal answered. Other errors (the bot wall, an
 /// outage) pass through.
 fn rejected_at_login(err: CliError, retry: &str) -> CliError {
-    match err {
-        CliError::Auth(m) => {
-            let why = m.strip_suffix(client::RENEW_ADVICE).unwrap_or(&m);
-            CliError::Auth(format!(
-                "the portal refused the session on the verifying read ({why}); nothing was \
-                 stored — sign in again and re-run `{retry}`"
-            ))
-        }
-        other => other,
+    if !err.is_auth() {
+        return err;
     }
+    let why = err.message();
+    CliError::Auth(format!(
+        "the portal refused the session on the verifying read ({why}); nothing was \
+         stored — sign in again and re-run `{retry}`"
+    ))
 }
 
 fn refresh(
@@ -745,6 +729,7 @@ fn refresh(
     creds: &CredentialStore,
     cfg: &Config,
 ) -> Result<(), CliError> {
+    client::refuse_capture_flag(args.command.is_some(), client::CAPTURE_RUNS_HERE)?;
     // Persist an explicit --command first, so a later plain `auth refresh` (and
     // automatic refresh) can use it.
     if args.save {
@@ -1055,7 +1040,7 @@ mod tests {
             "{m}"
         );
         assert_eq!(m.matches("network/upstream error").count(), 1, "{m}");
-        assert!(m.contains(bare_message(&upstream)), "{m}");
+        assert!(m.contains(upstream.message()), "{m}");
         assert!(
             m.contains(
                 "the browser profile is cleared and the session is deleted, but a renewal in \

@@ -32,7 +32,8 @@
 use std::time::Duration;
 
 use pk_cli_auth::refresh_lock::RefreshLock;
-use pk_cli_core::CliError;
+use pk_cli_core::transport::{same_host_redirects, secure_redirects};
+use pk_cli_core::{CliError, Reason};
 use pk_cli_secrets::{CredentialStore, Secret};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -50,8 +51,8 @@ pub const OAUTH_CLIENT_ID: &str = "mma";
 /// How a stored session that does not parse is reported.
 pub const SESSION_UNREADABLE: &str = "stored session is unreadable";
 
-/// How a dead refresh token words its way out, which a tool replaces with its own.
-pub const SIGN_IN_AGAIN: &str = " — sign in again with";
+/// How a dead refresh token is put right, which a tool replaces with its own.
+const SIGN_IN_AGAIN: &str = "sign in again with `nlnt auth login --browser --overwrite`";
 
 /// No session in the keychain.
 pub fn no_stored_session() -> CliError {
@@ -60,22 +61,19 @@ pub fn no_stored_session() -> CliError {
 
 /// A stored session that does not parse.
 pub fn session_unreadable(why: impl std::fmt::Display) -> CliError {
-    CliError::Other(format!("{SESSION_UNREADABLE}: {why}"))
+    CliError::Other(format!("{SESSION_UNREADABLE}: {why}")).because(Reason::CredentialUnreadable)
 }
 
 /// A session stored without a refresh token.
 pub fn no_refresh_token() -> CliError {
-    CliError::Auth(format!(
-        "the stored session has no refresh token{SIGN_IN_AGAIN} `nlnt auth login --browser --overwrite`"
-    ))
+    CliError::Auth("the stored session has no refresh token".into()).with_remedy(SIGN_IN_AGAIN)
 }
 
 /// The identity host's answer to a refresh token that has expired or was used.
 pub fn refresh_rejected() -> CliError {
-    CliError::Auth(format!(
-        "the refresh token was rejected (expired or already used){SIGN_IN_AGAIN} `nlnt auth login \
-         --browser --overwrite`"
-    ))
+    CliError::Auth("the refresh token was rejected (expired or already used)".into())
+        .because(Reason::CredentialRefused)
+        .with_remedy(SIGN_IN_AGAIN)
 }
 
 /// Portal API paths. CONFIRMED-LIVE 2026-08-12 by observing the SPA's own XHRs
@@ -264,18 +262,24 @@ pub fn now_secs() -> i64 {
 /// The API session: a Bearer-authenticated HTTP client for the API host.
 pub struct Portal {
     http: reqwest::blocking::Client,
+    /// For the token endpoint, whose body holds a refresh token. reqwest re-sends a body on a
+    /// 307 or 308, so this client follows no redirect to another host.
+    token_http: reqwest::blocking::Client,
     base: String,
     session: Session,
     verbose: bool,
 }
 
 impl Portal {
-    fn build_client() -> Result<reqwest::blocking::Client, CliError> {
+    fn build_client(
+        redirects: reqwest::redirect::Policy,
+    ) -> Result<reqwest::blocking::Client, CliError> {
         reqwest::blocking::Client::builder()
             .user_agent(user_agent())
             .default_headers(sentinel_headers())
             .timeout(HTTP_TIMEOUT)
             .connect_timeout(Duration::from_secs(15))
+            .redirect(redirects)
             .build()
             .map_err(|e| CliError::Other(format!("could not build HTTP client: {e}")))
     }
@@ -288,7 +292,8 @@ impl Portal {
         verbose: bool,
     ) -> Result<Self, CliError> {
         Ok(Portal {
-            http: Self::build_client()?,
+            http: Self::build_client(secure_redirects())?,
+            token_http: Self::build_client(same_host_redirects())?,
             base: base.into().trim_end_matches('/').to_string(),
             session,
             verbose,
@@ -344,9 +349,12 @@ impl Portal {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let body = resp
-            .text()
-            .map_err(|e| CliError::Upstream(format!("reading response body for {path}: {e}")))?;
+        let body = resp.text().map_err(|e| {
+            CliError::Upstream(format!(
+                "reading response body for {path}: {}",
+                e.without_url()
+            ))
+        })?;
         Ok(Answer {
             status,
             content_type,
@@ -385,7 +393,7 @@ impl Portal {
 
         let bytes = resp
             .bytes()
-            .map_err(|e| CliError::Upstream(format!("reading {path}: {e}")))?
+            .map_err(|e| CliError::Upstream(format!("reading {path}: {}", e.without_url())))?
             .to_vec();
 
         if let Some(msg) = pdf_error(&bytes, path) {
@@ -396,6 +404,25 @@ impl Portal {
             });
         }
         Ok(bytes)
+    }
+
+    /// The refresh grant itself, whose body holds the refresh token.
+    fn post_refresh(
+        &self,
+        url: &str,
+        refresh_token: &str,
+    ) -> reqwest::Result<reqwest::blocking::Response> {
+        self.token_http
+            .post(url)
+            // The token endpoint is same-origin with the identity SPA.
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("Accept", "application/json")
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", OAUTH_CLIENT_ID),
+                ("refresh_token", refresh_token),
+            ])
+            .send()
     }
 
     /// Exchange the stored refresh token for a fresh bundle and write it back.
@@ -423,26 +450,14 @@ impl Portal {
         if self.verbose {
             eprintln!("POST {url} (refresh_token grant)");
         }
-        let resp = self
-            .http
-            .post(&url)
-            // The token endpoint is same-origin with the identity SPA.
-            .header("Sec-Fetch-Site", "same-origin")
-            .header("Accept", "application/json")
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("client_id", OAUTH_CLIENT_ID),
-                ("refresh_token", refresh_token),
-            ])
-            .send()
-            .map_err(|e| {
-                CliError::Upstream(format!("token refresh failed: {}", e.without_url()))
-            })?;
+        let resp = self.post_refresh(&url, refresh_token).map_err(|e| {
+            CliError::Upstream(format!("token refresh failed: {}", e.without_url()))
+        })?;
 
         let status = resp.status().as_u16();
-        let body = resp
-            .text()
-            .map_err(|e| CliError::Upstream(format!("reading refresh response: {e}")))?;
+        let body = resp.text().map_err(|e| {
+            CliError::Upstream(format!("reading refresh response: {}", e.without_url()))
+        })?;
         if status == 403 && is_bot_wall(&body) {
             return Err(bot_wall_error(paths::OIDC_TOKEN));
         }
@@ -486,6 +501,28 @@ impl Portal {
         refreshed.store(creds)?;
         Ok(refreshed)
     }
+}
+
+/// A capture command runs under `sh`, and at its deadline is asked to stop with SIGTERM, which is
+/// what lets the reference script stop its Chrome. Windows has neither.
+pub const CAPTURE_RUNS_HERE: bool = cfg!(unix);
+
+/// The command a renewal may fall back to. Where none can run, a dead refresh token keeps its own
+/// message and remedy, not a missing-program error.
+fn capture_on(command: Option<&str>, runs_here: bool) -> Option<&str> {
+    command.filter(|_| runs_here)
+}
+
+/// `--command` asked for by name, where none can run.
+pub fn refuse_capture_flag(given: bool, runs_here: bool) -> Result<(), CliError> {
+    if given && !runs_here {
+        return Err(CliError::Usage(
+            "--command is not available on Windows: a capture command runs under `sh` and is \
+             stopped with SIGTERM; sign in with `nlnt auth login --browser --overwrite`"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Run the capture command and parse its stdout into a [`Session`].
@@ -633,6 +670,7 @@ pub fn refresh_or_relogin(
     verbose: bool,
     quiet: bool,
 ) -> Result<Session, CliError> {
+    let command = capture_on(command, CAPTURE_RUNS_HERE);
     let lock = RefreshLock::for_binary(crate::BIN)?;
     let plan = renew_session(
         &lock,
@@ -735,7 +773,7 @@ fn session_to_renew(
 ) -> Result<Option<Session>, CliError> {
     match read() {
         Ok(session) => Ok(Some(session)),
-        Err(CliError::Auth(_)) if has_command => Ok(None),
+        Err(e) if has_command && e.is_auth() => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -845,7 +883,7 @@ fn plan_after_refresh(
     match refresh {
         Some(Ok(session)) => RefreshPlan::Use(session),
         // Refresh token rejected (dead/rotated): fall back only if we can.
-        Some(Err(e @ CliError::Auth(_))) => {
+        Some(Err(e)) if e.is_auth() => {
             if has_command {
                 RefreshPlan::RunCommand
             } else {
@@ -886,16 +924,16 @@ fn relogin_via_command(
 }
 
 fn rejected_capture(err: CliError) -> CliError {
-    match err {
-        CliError::Auth(_) => CliError::Auth(
-            "the capture command returned a token the portal rejected — the identity session \
-             has likely lapsed, so a full login (username/password and, unless this device is \
-             trusted, an MFA code) is needed. Run `nlnt auth login --browser --overwrite`, or \
-             check the capture command's setup."
-                .into(),
-        ),
-        other => other,
+    if !err.is_auth() {
+        return err;
     }
+    CliError::Auth(
+        "the capture command returned a token the portal rejected — the identity session \
+         has likely lapsed, so a full login (username/password and, unless this device is \
+         trusted, an MFA code) is needed. Run `nlnt auth login --browser --overwrite`, or \
+         check the capture command's setup."
+            .into(),
+    )
 }
 
 /// Log in from a captured bundle: **prove it reads**, then store it.
@@ -993,10 +1031,7 @@ fn keep_finished_sign_in(
 ) -> Result<Option<Unverified>, CliError> {
     let unverified = match read() {
         Ok(()) => None,
-        Err(FailedRead {
-            error: refused @ CliError::Auth(_),
-            ..
-        }) => return Err(refused),
+        Err(FailedRead { error, .. }) if error.is_auth() => return Err(error),
         Err(FailedRead { error, edge_block }) => Some(Unverified {
             reason: error.to_string(),
             edge_block,
@@ -1092,8 +1127,7 @@ fn is_html_page(body: &str) -> bool {
 
 /// The advice on a refused read, kept apart so a login, with nothing stored to
 /// refresh, can drop it and keep the reason.
-pub const RENEW_ADVICE: &str =
-    "; run `nlnt auth refresh` (or `nlnt auth login --browser --overwrite`)";
+const RENEW_ADVICE: &str = "run `nlnt auth refresh` (or `nlnt auth login --browser --overwrite`)";
 
 /// The way out of an answer a stored session can't get past. Nothing renews on an
 /// edge block, and `auth login` refuses a stored session without `--overwrite`.
@@ -1149,10 +1183,12 @@ fn classify_error(path: &str, status: u16, body: &str) -> Option<CliError> {
         )));
     }
     if matches!(status, 401 | 403) {
-        return Some(CliError::Auth(format!(
-            "portal returned {status} for {path} — the access token is missing or \
-             expired{RENEW_ADVICE}"
-        )));
+        return Some(
+            CliError::Auth(format!(
+                "portal returned {status} for {path}: the access token is missing or expired"
+            ))
+            .with_remedy(RENEW_ADVICE),
+        );
     }
     if status == 404 {
         return Some(CliError::NotFound(format!("{path} (HTTP 404)")));
@@ -1298,6 +1334,40 @@ mod tests {
         let err = guard("/api/1/loan/overview", 401, "application/json", "{}").unwrap_err();
         assert_eq!(err.exit_code(), 3);
         assert!(err.to_string().contains("auth refresh"));
+    }
+
+    #[test]
+    fn where_no_capture_can_run_a_configured_one_is_ignored_and_the_flag_refused() {
+        assert_eq!(capture_on(Some("cmd"), true), Some("cmd"));
+        assert_eq!(capture_on(Some("cmd"), false), None);
+        assert!(refuse_capture_flag(false, false).is_ok());
+        assert!(refuse_capture_flag(true, true).is_ok());
+        let e = refuse_capture_flag(true, false).unwrap_err();
+        assert_eq!(e.exit_code(), 2);
+        assert!(e.to_string().contains("auth login --browser"), "{e}");
+    }
+
+    /// reqwest re-sends a body on a 307, so this is what would carry the refresh token away.
+    #[test]
+    fn a_refresh_answered_with_a_307_to_another_host_sends_the_token_nowhere() {
+        let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let there = elsewhere.local_addr().unwrap().port();
+        let cfg = portal_answering(format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://127.0.0.1:{there}/token\r\n\
+             content-length: 0\r\nconnection: close\r\n\r\n"
+        ));
+        let base = cfg.base_url.unwrap();
+        let portal = Portal::with_session(&base, session(), false).unwrap();
+        let err = portal
+            .post_refresh(&format!("{base}/token"), "dummy-refresh-token")
+            .unwrap_err();
+        assert!(err.is_redirect(), "{err}");
+        assert_eq!(
+            elsewhere.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the other host heard nothing"
+        );
     }
 
     /// A portal on loopback that gives one raw answer to one request, then hangs up.
