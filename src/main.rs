@@ -897,12 +897,6 @@ mod tests {
         assert!(warning.unwrap().contains("needs repair"));
     }
 
-    fn all_cleared() -> Vec<LogoutStep> {
-        vec![("the session", Ok(()))]
-    }
-
-    /// The logout's profile step on a temp dir through `test-util`'s
-    /// `forget_profile_in`, so the test never reaches the owner's real profile.
     #[test]
     fn a_forget_owes_the_note_whatever_the_keychain_held() {
         assert_eq!(logout_lines("out".into(), None), ["out"]);
@@ -916,6 +910,12 @@ mod tests {
         assert!(none[1].contains("$NLNT_MCP_TOKEN"), "{none:?}");
     }
 
+    fn all_cleared() -> Vec<LogoutStep> {
+        vec![("the session", Ok(()))]
+    }
+
+    /// The logout's profile step on a temp dir through `test-util`'s
+    /// `forget_profile_in`, so the test never reaches the owner's real profile.
     #[test]
     fn logout_removes_the_kept_browser_profile() {
         let root = tempfile::tempdir().unwrap();
