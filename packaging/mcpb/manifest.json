@@ -16,7 +16,7 @@
   "homepage": "https://github.com/piekstra/nelnet-cli",
   "documentation": "https://github.com/piekstra/nelnet-cli#use-with-claude",
   "support": "https://github.com/piekstra/nelnet-cli/issues",
-  "license": "MIT OR Apache-2.0",
+  "license": "AGPL-3.0-only",
   "keywords": [
     "nelnet",
     "student-loans",

@@ -5,7 +5,7 @@ edition = "2021"
 # pk-cli-auth (cli-common v0.21.0) needs 1.89.
 rust-version = "1.89"
 description = "Command-line access to the Nelnet federal student-loan servicing portal: balances, accrued interest, payment history, and 1098-E tax documents."
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-only"
 repository = "https://github.com/piekstra/nelnet-cli"
 authors = ["piekstra"]
 publish = false
